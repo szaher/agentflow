@@ -1,0 +1,31 @@
+{
+  "name": "fast",
+  "description": "Minimal low-risk loop: implement and run fast deterministic checks.",
+  "version": "1.0",
+  "entry": "implement",
+  "tags": [
+    "fast",
+    "low-risk"
+  ],
+  "defaults": {},
+  "stages": [
+    {
+      "id": "implement",
+      "kind": "agent",
+      "title": "Implement bounded change",
+      "on_success": "verify",
+      "on_failure": "blocked",
+      "role": "implementer",
+      "instruction": "Implement only the requested bounded change. Inspect the repository first; preserve unrelated changes.",
+      "max_attempts": 2
+    },
+    {
+      "id": "verify",
+      "kind": "gate",
+      "title": "Run fast deterministic verification",
+      "on_success": "done",
+      "on_failure": "implement",
+      "gate_profile": "fast"
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "name": "refactor",
+  "description": "Behavior-preserving refactor with characterization and strict regression verification.",
+  "version": "1.0",
+  "entry": "characterize",
+  "tags": [
+    "refactor",
+    "regression"
+  ],
+  "defaults": {},
+  "stages": [
+    {
+      "id": "characterize",
+      "kind": "agent",
+      "title": "Characterize current behavior and risk",
+      "on_success": "implement",
+      "on_failure": "blocked",
+      "role": "planner",
+      "instruction": "Identify behavior that must remain unchanged. Add characterization tests where important behavior is not already protected.",
+      "max_attempts": 2
+    },
+    {
+      "id": "implement",
+      "kind": "agent",
+      "title": "Refactor without intentional behavior change",
+      "on_success": "verify",
+      "on_failure": "blocked",
+      "role": "implementer",
+      "instruction": "Refactor the requested area. Do not intentionally change externally observable behavior.",
+      "max_attempts": 3
+    },
+    {
+      "id": "verify",
+      "kind": "gate",
+      "title": "Run strict deterministic verification",
+      "on_success": "review",
+      "on_failure": "implement",
+      "gate_profile": "strict"
+    },
+    {
+      "id": "review",
+      "kind": "review",
+      "title": "Independent review (1 reviewer)",
+      "on_success": "done",
+      "on_failure": "implement",
+      "reviewers": 1
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "name": "standard",
+  "description": "Balanced default: plan, implement, deterministic verification, independent review, risk-based approval.",
+  "version": "1.0",
+  "entry": "plan",
+  "tags": [
+    "default",
+    "review"
+  ],
+  "defaults": {},
+  "stages": [
+    {
+      "id": "plan",
+      "kind": "agent",
+      "title": "Create a bounded implementation plan",
+      "on_success": "implement",
+      "on_failure": "blocked",
+      "role": "planner",
+      "instruction": "Inspect the codebase and produce a concise implementation plan in your response. Do not modify code unless needed to capture a project-local plan.",
+      "max_attempts": 1
+    },
+    {
+      "id": "implement",
+      "kind": "agent",
+      "title": "Implement bounded change",
+      "on_success": "verify",
+      "on_failure": "blocked",
+      "role": "implementer",
+      "instruction": "Implement only the requested bounded change. Inspect the repository first; preserve unrelated changes.",
+      "max_attempts": 3
+    },
+    {
+      "id": "verify",
+      "kind": "gate",
+      "title": "Run standard deterministic verification",
+      "on_success": "review",
+      "on_failure": "implement",
+      "gate_profile": "standard"
+    },
+    {
+      "id": "review",
+      "kind": "review",
+      "title": "Independent review (1 reviewer)",
+      "on_success": "approve",
+      "on_failure": "implement",
+      "reviewers": 1
+    },
+    {
+      "id": "approve",
+      "kind": "human",
+      "title": "Human/risk approval",
+      "on_success": "done",
+      "on_failure": "blocked",
+      "metadata": {
+        "always": false
+      }
+    }
+  ]
+}

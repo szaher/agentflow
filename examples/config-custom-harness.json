@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "pattern": "checkpoint",
+  "executor": "acme-agent",
+  "reviewers": ["codex", "pi"],
+  "gate_profile": "strict",
+  "max_repair_attempts": 3,
+  "auto_approve_low_risk": true,
+  "human_approval_for": ["high", "critical"],
+  "harness": {
+    "acme-agent": {
+      "command": ["acme-agent", "run", "--non-interactive", "{prompt}"]
+    }
+  },
+  "gates": {
+    "strict": ["make lint", "make typecheck", "make test", "make build"]
+  }
+}

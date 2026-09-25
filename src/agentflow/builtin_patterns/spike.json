@@ -1,0 +1,31 @@
+{
+  "name": "spike",
+  "description": "Time-bounded exploratory spike that produces evidence and a recommendation, not production code acceptance.",
+  "version": "1.0",
+  "entry": "explore",
+  "tags": [
+    "research",
+    "spike"
+  ],
+  "defaults": {},
+  "stages": [
+    {
+      "id": "explore",
+      "kind": "agent",
+      "title": "Run bounded technical spike",
+      "on_success": "review",
+      "on_failure": "blocked",
+      "role": "researcher",
+      "instruction": "Explore the requested technical question with minimal disposable code or experiments. Record assumptions, observations, constraints, and unresolved risks. Do not present spike code as production-ready.",
+      "max_attempts": 2
+    },
+    {
+      "id": "review",
+      "kind": "review",
+      "title": "Independent review (1 reviewer)",
+      "on_success": "done",
+      "on_failure": "explore",
+      "reviewers": 1
+    }
+  ]
+}

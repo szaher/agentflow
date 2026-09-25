@@ -1,0 +1,49 @@
+{
+  "name": "pair-review",
+  "description": "Implementation followed by two diverse independent reviewers before acceptance.",
+  "version": "1.0",
+  "entry": "implement",
+  "tags": [
+    "review",
+    "multi-agent"
+  ],
+  "defaults": {},
+  "stages": [
+    {
+      "id": "implement",
+      "kind": "agent",
+      "title": "Implement bounded change",
+      "on_success": "verify",
+      "on_failure": "blocked",
+      "role": "implementer",
+      "instruction": "Implement only the requested bounded change. Inspect the repository first; preserve unrelated changes.",
+      "max_attempts": 3
+    },
+    {
+      "id": "verify",
+      "kind": "gate",
+      "title": "Run standard deterministic verification",
+      "on_success": "review",
+      "on_failure": "implement",
+      "gate_profile": "standard"
+    },
+    {
+      "id": "review",
+      "kind": "review",
+      "title": "Independent review (2 reviewers)",
+      "on_success": "approve",
+      "on_failure": "implement",
+      "reviewers": 2
+    },
+    {
+      "id": "approve",
+      "kind": "human",
+      "title": "Human/risk approval",
+      "on_success": "done",
+      "on_failure": "blocked",
+      "metadata": {
+        "always": false
+      }
+    }
+  ]
+}

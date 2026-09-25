@@ -1,0 +1,59 @@
+{
+  "name": "reproduce-first",
+  "description": "Bug-fix workflow that requires reproduction before repair.",
+  "version": "1.0",
+  "entry": "reproduce",
+  "tags": [
+    "bugfix",
+    "regression"
+  ],
+  "defaults": {},
+  "stages": [
+    {
+      "id": "reproduce",
+      "kind": "agent",
+      "title": "Reproduce the bug and capture a regression test",
+      "on_success": "implement",
+      "on_failure": "blocked",
+      "role": "diagnostician",
+      "instruction": "Reproduce the reported defect. Add a regression test or deterministic reproducer that fails before the fix. Do not fix the bug yet.",
+      "max_attempts": 2
+    },
+    {
+      "id": "implement",
+      "kind": "agent",
+      "title": "Repair the reproduced defect",
+      "on_success": "verify",
+      "on_failure": "blocked",
+      "role": "implementer",
+      "instruction": "Fix the reproduced defect with the smallest safe change. Do not weaken the reproducer.",
+      "max_attempts": 3
+    },
+    {
+      "id": "verify",
+      "kind": "gate",
+      "title": "Run strict deterministic verification",
+      "on_success": "review",
+      "on_failure": "implement",
+      "gate_profile": "strict"
+    },
+    {
+      "id": "review",
+      "kind": "review",
+      "title": "Independent review (1 reviewer)",
+      "on_success": "approve",
+      "on_failure": "implement",
+      "reviewers": 1
+    },
+    {
+      "id": "approve",
+      "kind": "human",
+      "title": "Human/risk approval",
+      "on_success": "done",
+      "on_failure": "blocked",
+      "metadata": {
+        "always": false
+      }
+    }
+  ]
+}

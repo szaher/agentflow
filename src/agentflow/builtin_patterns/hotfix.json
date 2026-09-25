@@ -1,0 +1,60 @@
+{
+  "name": "hotfix",
+  "description": "Production hotfix: reproduce, smallest repair, strict tests, fast review, mandatory approval.",
+  "version": "1.0",
+  "entry": "triage",
+  "tags": [
+    "hotfix",
+    "production",
+    "high-risk"
+  ],
+  "defaults": {},
+  "stages": [
+    {
+      "id": "triage",
+      "kind": "agent",
+      "title": "Confirm incident scope and safe reproduction",
+      "on_success": "implement",
+      "on_failure": "blocked",
+      "role": "diagnostician",
+      "instruction": "Confirm the failure mode and blast radius. Establish a safe reproducer or concrete evidence. Identify rollback option before editing.",
+      "max_attempts": 2
+    },
+    {
+      "id": "implement",
+      "kind": "agent",
+      "title": "Implement minimal hotfix",
+      "on_success": "verify",
+      "on_failure": "blocked",
+      "role": "implementer",
+      "instruction": "Make the smallest change that resolves the confirmed production defect. Avoid opportunistic refactors.",
+      "max_attempts": 2
+    },
+    {
+      "id": "verify",
+      "kind": "gate",
+      "title": "Run strict deterministic verification",
+      "on_success": "review",
+      "on_failure": "implement",
+      "gate_profile": "strict"
+    },
+    {
+      "id": "review",
+      "kind": "review",
+      "title": "Independent review (1 reviewer)",
+      "on_success": "approve",
+      "on_failure": "implement",
+      "reviewers": 1
+    },
+    {
+      "id": "approve",
+      "kind": "human",
+      "title": "Human/risk approval",
+      "on_success": "done",
+      "on_failure": "blocked",
+      "metadata": {
+        "always": true
+      }
+    }
+  ]
+}

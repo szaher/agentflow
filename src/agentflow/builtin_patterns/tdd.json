@@ -1,0 +1,67 @@
+{
+  "name": "tdd",
+  "description": "Red-green-refactor workflow for behavior changes.",
+  "version": "1.0",
+  "entry": "red",
+  "tags": [
+    "testing",
+    "tdd"
+  ],
+  "defaults": {},
+  "stages": [
+    {
+      "id": "red",
+      "kind": "agent",
+      "title": "RED: add a focused failing test",
+      "on_success": "implement",
+      "on_failure": "blocked",
+      "role": "test-author",
+      "instruction": "Add the smallest test that demonstrates the missing behavior. Confirm it fails for the intended reason before implementing the fix.",
+      "max_attempts": 2
+    },
+    {
+      "id": "implement",
+      "kind": "agent",
+      "title": "GREEN: minimal implementation",
+      "on_success": "verify",
+      "on_failure": "blocked",
+      "role": "implementer",
+      "instruction": "Implement the minimum production change that makes the new test pass without weakening the test.",
+      "max_attempts": 3
+    },
+    {
+      "id": "verify",
+      "kind": "gate",
+      "title": "Run standard deterministic verification",
+      "on_success": "refactor",
+      "on_failure": "implement",
+      "gate_profile": "standard"
+    },
+    {
+      "id": "refactor",
+      "kind": "agent",
+      "title": "REFACTOR: improve structure without behavior change",
+      "on_success": "verify-final",
+      "on_failure": "blocked",
+      "role": "implementer",
+      "instruction": "Refactor only where useful. Do not add behavior. Preserve passing tests.",
+      "max_attempts": 2
+    },
+    {
+      "id": "verify-final",
+      "kind": "gate",
+      "title": "Final deterministic verification",
+      "on_success": "review",
+      "on_failure": "refactor",
+      "gate_profile": "strict"
+    },
+    {
+      "id": "review",
+      "kind": "review",
+      "title": "Independent review (1 reviewer)",
+      "on_success": "done",
+      "on_failure": "implement",
+      "reviewers": 1
+    }
+  ]
+}

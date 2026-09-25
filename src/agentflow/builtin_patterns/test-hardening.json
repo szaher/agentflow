@@ -1,0 +1,49 @@
+{
+  "name": "test-hardening",
+  "description": "Improve test quality without changing production behavior unless a discovered bug requires a separate decision.",
+  "version": "1.0",
+  "entry": "analyze",
+  "tags": [
+    "tests",
+    "quality"
+  ],
+  "defaults": {},
+  "stages": [
+    {
+      "id": "analyze",
+      "kind": "agent",
+      "title": "Identify test gaps and weak assertions",
+      "on_success": "implement",
+      "on_failure": "blocked",
+      "role": "test-analyst",
+      "instruction": "Identify high-value missing cases, flaky patterns, weak assertions and uncovered invariants. Prioritize behavior, not line coverage alone.",
+      "max_attempts": 2
+    },
+    {
+      "id": "implement",
+      "kind": "agent",
+      "title": "Add or strengthen tests",
+      "on_success": "verify",
+      "on_failure": "blocked",
+      "role": "implementer",
+      "instruction": "Strengthen the test suite. Avoid production changes unless strictly required to expose test seams; flag discovered product bugs rather than silently changing behavior.",
+      "max_attempts": 3
+    },
+    {
+      "id": "verify",
+      "kind": "gate",
+      "title": "Run strict deterministic verification",
+      "on_success": "review",
+      "on_failure": "implement",
+      "gate_profile": "strict"
+    },
+    {
+      "id": "review",
+      "kind": "review",
+      "title": "Independent review (1 reviewer)",
+      "on_success": "done",
+      "on_failure": "implement",
+      "reviewers": 1
+    }
+  ]
+}

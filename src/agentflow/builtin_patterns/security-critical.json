@@ -1,0 +1,60 @@
+{
+  "name": "security-critical",
+  "description": "Security-sensitive change with threat analysis, strict verification, two reviews, mandatory human approval.",
+  "version": "1.0",
+  "entry": "threat-model",
+  "tags": [
+    "security",
+    "high-risk",
+    "mandatory-approval"
+  ],
+  "defaults": {},
+  "stages": [
+    {
+      "id": "threat-model",
+      "kind": "agent",
+      "title": "Threat and abuse-case analysis",
+      "on_success": "implement",
+      "on_failure": "blocked",
+      "role": "security-analyst",
+      "instruction": "Identify trust boundaries, attacker goals, abuse cases, sensitive assets, authorization assumptions, and required security tests before coding.",
+      "max_attempts": 2
+    },
+    {
+      "id": "implement",
+      "kind": "agent",
+      "title": "Implement bounded change",
+      "on_success": "verify",
+      "on_failure": "blocked",
+      "role": "implementer",
+      "instruction": "Implement only the requested bounded change. Inspect the repository first; preserve unrelated changes.",
+      "max_attempts": 3
+    },
+    {
+      "id": "verify",
+      "kind": "gate",
+      "title": "Run strict deterministic verification",
+      "on_success": "review",
+      "on_failure": "implement",
+      "gate_profile": "strict"
+    },
+    {
+      "id": "review",
+      "kind": "review",
+      "title": "Independent review (2 reviewers)",
+      "on_success": "approve",
+      "on_failure": "implement",
+      "reviewers": 2
+    },
+    {
+      "id": "approve",
+      "kind": "human",
+      "title": "Human/risk approval",
+      "on_success": "done",
+      "on_failure": "blocked",
+      "metadata": {
+        "always": true
+      }
+    }
+  ]
+}

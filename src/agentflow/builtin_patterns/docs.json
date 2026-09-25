@@ -1,0 +1,31 @@
+{
+  "name": "docs",
+  "description": "Documentation change with lightweight verification.",
+  "version": "1.0",
+  "entry": "write",
+  "tags": [
+    "documentation",
+    "fast"
+  ],
+  "defaults": {},
+  "stages": [
+    {
+      "id": "write",
+      "kind": "agent",
+      "title": "Update documentation against source of truth",
+      "on_success": "verify",
+      "on_failure": "blocked",
+      "role": "technical-writer",
+      "instruction": "Update the requested documentation. Verify commands, names, paths, examples, and claims against the repository/source of truth.",
+      "max_attempts": 2
+    },
+    {
+      "id": "verify",
+      "kind": "gate",
+      "title": "Run available lightweight checks",
+      "on_success": "done",
+      "on_failure": "write",
+      "gate_profile": "fast"
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "name": "performance",
+  "description": "Measure-first performance optimization workflow.",
+  "version": "1.0",
+  "entry": "baseline",
+  "tags": [
+    "performance",
+    "benchmark"
+  ],
+  "defaults": {},
+  "stages": [
+    {
+      "id": "baseline",
+      "kind": "agent",
+      "title": "Establish reproducible performance baseline",
+      "on_success": "implement",
+      "on_failure": "blocked",
+      "role": "performance-analyst",
+      "instruction": "Establish a reproducible benchmark/profile and identify the dominant bottleneck. Record baseline metrics before optimizing.",
+      "max_attempts": 2
+    },
+    {
+      "id": "implement",
+      "kind": "agent",
+      "title": "Optimize measured bottleneck",
+      "on_success": "verify",
+      "on_failure": "blocked",
+      "role": "implementer",
+      "instruction": "Optimize the measured bottleneck without changing required behavior. Keep benchmark methodology stable.",
+      "max_attempts": 3
+    },
+    {
+      "id": "verify",
+      "kind": "gate",
+      "title": "Run strict deterministic verification",
+      "on_success": "review",
+      "on_failure": "implement",
+      "gate_profile": "strict"
+    },
+    {
+      "id": "review",
+      "kind": "review",
+      "title": "Independent review (1 reviewer)",
+      "on_success": "done",
+      "on_failure": "implement",
+      "reviewers": 1
+    }
+  ]
+}

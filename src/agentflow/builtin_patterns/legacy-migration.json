@@ -1,0 +1,60 @@
+{
+  "name": "legacy-migration",
+  "description": "Incremental strangler-style migration with bounded slices and parity review.",
+  "version": "1.0",
+  "entry": "inventory",
+  "tags": [
+    "legacy",
+    "migration",
+    "checkpoint"
+  ],
+  "defaults": {},
+  "stages": [
+    {
+      "id": "inventory",
+      "kind": "agent",
+      "title": "Map legacy behavior and migration slice",
+      "on_success": "implement",
+      "on_failure": "blocked",
+      "role": "migration-planner",
+      "instruction": "Map the legacy behavior, dependencies and callers. Select one bounded migration slice with parity criteria and fallback path.",
+      "max_attempts": 2
+    },
+    {
+      "id": "implement",
+      "kind": "agent",
+      "title": "Implement bounded change",
+      "on_success": "verify",
+      "on_failure": "blocked",
+      "role": "implementer",
+      "instruction": "Implement only the requested bounded change. Inspect the repository first; preserve unrelated changes.",
+      "max_attempts": 4
+    },
+    {
+      "id": "verify",
+      "kind": "gate",
+      "title": "Run strict deterministic verification",
+      "on_success": "review",
+      "on_failure": "implement",
+      "gate_profile": "strict"
+    },
+    {
+      "id": "review",
+      "kind": "review",
+      "title": "Independent review (2 reviewers)",
+      "on_success": "approve",
+      "on_failure": "implement",
+      "reviewers": 2
+    },
+    {
+      "id": "approve",
+      "kind": "human",
+      "title": "Human/risk approval",
+      "on_success": "done",
+      "on_failure": "blocked",
+      "metadata": {
+        "always": true
+      }
+    }
+  ]
+}

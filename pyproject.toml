@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentflow-meta"
+version = "0.1.0"
+description = "Agentic SDLC meta-harness for Claude Code, Codex, Pi, OpenCode, and other coding agents"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [{name = "Agentflow contributors"}]
+keywords = ["agents", "sdlc", "claude-code", "codex", "pi", "opencode"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "License :: OSI Approved :: Apache Software License",
+]
+
+[project.scripts]
+agentflow = "agentflow.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+agentflow = ["builtin_patterns/*.json"]
