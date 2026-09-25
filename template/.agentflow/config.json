@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "policy": {
+    "max_attempts": 3,
+    "high_risk_requires_human": true,
+    "reviewer_must_not_mutate_worktree": true,
+    "stale_evidence_is_invalid": true
+  },
+  "project": {
+    "root": ".",
+    "detected": [
+      "generic"
+    ]
+  },
+  "gates": {
+    "fast": [
+      {
+        "name": "git-diff-check",
+        "command": "git diff --check",
+        "required": true
+      }
+    ],
+    "standard": [
+      {
+        "name": "git-diff-check",
+        "command": "git diff --check",
+        "required": true
+      }
+    ],
+    "strict": [
+      {
+        "name": "git-diff-check",
+        "command": "git diff --check",
+        "required": true
+      }
+    ]
+  }
+}
