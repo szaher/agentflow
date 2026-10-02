@@ -1,14 +1,36 @@
 from __future__ import annotations
 
 from pathlib import Path
-from .git import git_text
+from .git import IGNORE_PREFIXES, git_text
 
 HIGH = ("auth", "security", "permission", "migration", "schema", "deploy", "infra", "terraform", "secret", "payment", "billing", "credential")
 MEDIUM = ("api", "database", "config", "workflow", "ci", "docker", "kubernetes")
 
 
+def changed_paths(root: Path) -> list[str]:
+    """Every path the working tree changes: modified, staged, deleted, renamed, and untracked.
+
+    Untracked files must count: a brand-new module is a change too. ``git status``
+    also works before the first commit, when ``git diff HEAD`` fails.
+    """
+    fields = git_text(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]).split("\0")
+    paths: list[str] = []
+    i = 0
+    while i < len(fields):
+        entry = fields[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        code, path = entry[:2], entry[3:]
+        paths.append(path)
+        if "R" in code or "C" in code:
+            paths.append(fields[i])  # -z puts the rename/copy source in the next field
+            i += 1
+    return sorted({p for p in paths if p and not p.startswith(IGNORE_PREFIXES)})
+
+
 def classify(root: Path) -> tuple[str, list[str]]:
-    files = git_text(root, ["diff", "--name-only", "HEAD", "--", "."]).lower().splitlines()
+    files = [p.lower() for p in changed_paths(root)]
     joined = "\n".join(files)
     reasons: list[str] = []
     for token in HIGH:
