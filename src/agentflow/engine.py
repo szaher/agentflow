@@ -3,11 +3,11 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from .config import Project
+from .config import ROOT_ENV, RUN_ENV, WORKSPACE_ENV, Project
 from .evidence import write_agent_evidence, write_gate_evidence, write_precondition_evidence, write_review_evidence
 from .agentic import Agentic, AgenticError
 from .gates import run_gates
-from .git import implementation_fingerprint
+from .git import implementation_fingerprint, uncommitted_changes
 from .harnesses import get as get_harness
 from .models import Pattern, RunState, Stage
 from .patterns import load_pattern
@@ -36,21 +36,39 @@ class Engine:
         self.pattern: Pattern = load_pattern(state.pattern, self.root)
         self.requirements = requirements(self.pattern)
         self._outcome = "unknown"
-        self._metrics_off = False
+        # Durable across `agentflow step` invocations: one metrics_unavailable record per run.
+        self._metrics_off = any(h.get("event") == "metrics_unavailable" for h in state.history)
 
     @property
     def workspace(self) -> Path:
         return workspace(self.root, self.state)
+
+    @property
+    def harness_env(self) -> dict[str, str]:
+        """Bridges a harness running in the workspace back to this run's control root."""
+
+        return {ROOT_ENV: str(self.root), WORKSPACE_ENV: str(self.workspace), RUN_ENV: self.state.run_id}
+
+    def _evidence_root(self) -> Path | None:
+        """Evidence paths are relative to the control root; qualify them when the agent works elsewhere."""
+
+        return self.root if self.workspace.resolve() != self.root.resolve() else None
 
     # -- run start: worktree, then preconditions in that workspace, then the first stage ------
 
     def start(self) -> str:
         """Prepare a new run. Order: create the worktree (if isolated), then readiness and
         capability preconditions in that workspace. A failed precondition blocks the run;
-        nothing is remediated or enabled on the user's behalf."""
+        nothing is remediated or enabled on the user's behalf.
 
+        Restart-safe: ``state.started`` is persisted only once preparation completed, and
+        :meth:`step` never runs a stage before that. A worktree recorded (or created) by an
+        interrupted start is validated and reused, never created twice."""
+
+        if self.state.started or self.state.status != "running":
+            return self.state.status
         reqs = self.requirements
-        if reqs.worktree and not self._create_worktree():
+        if reqs.worktree and not self._ensure_worktree():
             return self.state.status
         blockers: list[str] = []
         try:
@@ -73,24 +91,46 @@ class Engine:
             return self.state.status
         if reqs.readiness or reqs.capabilities:
             record(self.state, "preconditions_passed", workspace=str(self.workspace))
-            save_state(self.root, self.state)
+        self.state.started = True
+        record(self.state, "run_started", workspace=str(self.workspace))
+        save_state(self.root, self.state)
         return self.state.status
 
-    def _create_worktree(self) -> bool:
+    def _ensure_worktree(self) -> bool:
+        tree = self.state.worktree
+        if tree:  # recorded by an interrupted start: reuse it, never create a second one
+            if Path(tree["path"]).is_dir():
+                return True
+            self._transition("blocked", f"the run's worktree is missing: {tree['path']}")
+            return False
         base = self.state.run_start_commit
         if not base:
             self._transition("blocked", "worktree isolation needs a commit to start from; commit first")
             return False
-        name = f"agentflow-{self.state.run_id}"
-        try:
-            document = self.agentic.create_worktree(self.root, name=name, branch=f"agentflow/{self.state.run_id}",
-                                                    base=base, agent=self.state.executor, task=self.state.task)
-        except AgenticError as exc:
-            self._transition("blocked", f"worktree could not be created: {exc}")
+        dirty = uncommitted_changes(self.root)
+        if dirty:
+            shown = ", ".join(dirty[:8]) + (f" (+{len(dirty) - 8} more)" if len(dirty) > 8 else "")
+            self._transition("blocked", "worktree isolation starts from the committed run-start snapshot; "
+                                        f"commit or stash the current changes first: {shown}")
             return False
-        self.state.worktree = {"name": name, "path": document["worktree"], "branch": document["branch"],
+        name, branch = f"agentflow-{self.state.run_id}", f"agentflow/{self.state.run_id}"
+        try:
+            document = self.agentic.create_worktree(self.root, name=name, branch=branch, base=base,
+                                                    agent=self.state.executor, task=self.state.task)
+            event = "worktree_created"
+        except AgenticError as exc:
+            # Created before an interruption but never recorded? Adopt it only if it is exactly ours.
+            try:
+                document = self.agentic.worktree_status(self.root, name)
+            except AgenticError:
+                document = None
+            if not document or document["branch"] != branch:
+                self._transition("blocked", f"worktree could not be created: {exc}")
+                return False
+            event = "worktree_adopted"
+        self.state.worktree = {"name": name, "path": document["worktree"], "branch": branch,
                                "base": base, "cleaned": False}
-        record(self.state, "worktree_created", **{k: v for k, v in self.state.worktree.items() if k != "cleaned"})
+        record(self.state, event, **{k: v for k, v in self.state.worktree.items() if k != "cleaned"})
         save_state(self.root, self.state)
         return True
 
@@ -156,6 +196,8 @@ class Engine:
     def step(self) -> str:
         if self.state.status in {"complete", "blocked", "awaiting_approval"}:
             return self.state.status
+        if not self.state.started and self.start() != "running":
+            return self.state.status
         if not self.workspace.is_dir():
             self._transition("blocked", f"the run's worktree is missing: {self.workspace}")
             return self.state.status
@@ -188,7 +230,8 @@ class Engine:
         save_state(self.root, self.state)
         cfg = self.project.config.harness.get(self.state.executor, {})
         harness = get_harness(self.state.executor, cfg)
-        result = harness.execute(self.workspace, stage_prompt(self.pattern, stage, self.state), extra=cfg)
+        prompt = stage_prompt(self.pattern, stage, self.state, control_root=self._evidence_root())
+        result = harness.execute(self.workspace, prompt, extra=cfg, env=self.harness_env)
         fp = implementation_fingerprint(self.workspace)
         ep = write_agent_evidence(self.root, self.state, harness.name, result.stdout, result.stderr, fp, result.returncode)
         self.state.evidence.append({"kind": "agent", "path": str(ep.relative_to(self.root)), "fingerprint": fp, "stage": stage.id, "harness": harness.name})
@@ -240,7 +283,8 @@ class Engine:
             cfg = self.project.config.harness.get(name, {})
             harness = get_harness(name, cfg)
             before = implementation_fingerprint(work)
-            result = harness.execute(work, review_prompt(self.pattern, stage, self.state), read_only=True, extra=cfg)
+            result = harness.execute(work, review_prompt(self.pattern, stage, self.state), read_only=True, extra=cfg,
+                                     env=self.harness_env)
             after = implementation_fingerprint(work)
             clean = before == after
             passed = result.returncode == 0 and clean and "AGENTFLOW_REVIEW_PASS" in result.stdout and "AGENTFLOW_REVIEW_FAIL" not in result.stdout

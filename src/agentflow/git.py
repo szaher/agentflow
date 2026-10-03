@@ -49,6 +49,17 @@ def status_porcelain(root: Path) -> str:
     return git_text(root, ["status", "--porcelain=v1", "--untracked-files=all"])
 
 
+def uncommitted_changes(root: Path) -> list[str]:
+    """Paths with uncommitted changes (tracked or untracked), excluding AgentFlow's runtime artifacts."""
+
+    paths = []
+    for line in status_porcelain(root).splitlines():
+        path = line[3:].split(" -> ")[-1].strip('"')
+        if path and not path.startswith(IGNORE_PREFIXES):
+            paths.append(path)
+    return paths
+
+
 def head_commit(root: Path) -> str | None:
     """The commit a run starts from; the stable base for change-aware verification."""
     return git_text(root, ["rev-parse", "--verify", "--quiet", "HEAD"]).strip() or None

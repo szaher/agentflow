@@ -45,7 +45,7 @@ DOCTOR_CONTRACTS = {"contracts": "1", "doctor": "1"}
 READINESS_CONTRACTS = {"contracts": "1", "readiness-verification": "1"}
 READINESS_FEATURES = ("readiness.scope-ci",)  # introduced `--scope local|ci`
 CAPABILITY_CONTRACTS = {"contracts": "1", "capability-status": "1"}
-WORKTREE_CONTRACTS = {"contracts": "1", "worktree": "1", "worktree-clean": "1"}
+WORKTREE_CONTRACTS = {"contracts": "1", "worktree": "1", "worktree-status": "1", "worktree-clean": "1"}
 WORKTREE_FEATURES = ("worktree.lifecycle",)
 METRICS_CONTRACTS = {"contracts": "1", "metric-record": "1"}
 METRICS_FEATURES = ("metrics.record-report",)
@@ -278,6 +278,16 @@ class Agentic:
             args += ["--task", task]
         _, document = self._call(args, cwd=root)
         return self._validated("worktree", document)
+
+    def worktree_status(self, root: Path, name: str) -> dict[str, Any]:
+        """One worktree's state (worktree-status v1). An unknown name exits 2 and raises AgenticError."""
+
+        self.handshake(WORKTREE_CONTRACTS, WORKTREE_FEATURES)
+        _, document = self._call(["worktree", "status", name, "--path", str(root), "--json"], cwd=root)
+        self._validated("worktree-status", document)
+        if not (isinstance(document.get("worktree"), str) and isinstance(document.get("branch"), str)):
+            raise AgenticError(f"`agentic worktree status {name}` did not report a worktree path and branch")
+        return document
 
     def clean_worktree(self, root: Path, name: str) -> dict[str, Any]:
         """Remove a worktree the normal way (worktree-clean v1): never ``--force``, never deletes the branch.

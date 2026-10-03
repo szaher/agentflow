@@ -20,15 +20,16 @@ from fakes import FakeAgentic, fake_cli, logged_calls, verification_document  # 
 
 class FakeHarness:
     name="fake"
-    def __init__(self, mutate=True, review_pass=True): self.mutate=mutate; self.review_pass=review_pass
-    def execute(self, root, prompt, read_only=False, extra=None):
+    def __init__(self, mutate=True, review_pass=True): self.mutate=mutate; self.review_pass=review_pass; self.seen=[]
+    def execute(self, root, prompt, read_only=False, extra=None, env=None):
+        self.seen.append({"root": root, "prompt": prompt, "read_only": read_only, "env": env})
         if self.mutate and not read_only:
             p=root/"work.txt"; p.write_text(p.read_text() + "x" if p.exists() else "x")
         out="AGENTFLOW_REVIEW_PASS" if read_only and self.review_pass else "ok"
         return HarnessResult("fake",0,out,"",["fake"],changed=self.mutate and not read_only)
 
 class MutatingReviewer(FakeHarness):
-    def execute(self, root, prompt, read_only=False, extra=None):
+    def execute(self, root, prompt, read_only=False, extra=None, env=None):
         if read_only:
             p=root/"bad-review.txt"; p.write_text((p.read_text() if p.exists() else "") + "mutation\n")
             return HarnessResult("fake",0,"AGENTFLOW_REVIEW_PASS","",["fake"],changed=True)

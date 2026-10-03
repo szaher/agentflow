@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from .models import Pattern, Stage, RunState
 
 CORE = """You are executing one stage of an Agentflow Agentic SDLC pattern.
@@ -10,9 +12,17 @@ Read AGENTS.md and repository-local instructions before making changes.
 """
 
 
-def stage_prompt(pattern: Pattern, stage: Stage, state: RunState) -> str:
-    prior = "\n".join(f"- {e.get('kind')}: {e.get('path')}" for e in state.evidence[-6:]) or "- none yet"
-    return f"""{CORE}
+def stage_prompt(pattern: Pattern, stage: Stage, state: RunState, control_root: Path | None = None) -> str:
+    """``control_root`` is set when the agent works in an isolated worktree: evidence lives in the
+    primary checkout, so its paths are given absolute, and the agent is told where state lives."""
+
+    def where(path: str | None) -> str | None:
+        return str(control_root / path) if control_root and path else path
+
+    prior = "\n".join(f"- {e.get('kind')}: {where(e.get('path'))}" for e in state.evidence[-6:]) or "- none yet"
+    isolation = (f"\nIsolation: you are working in this run's own worktree. AgentFlow state and evidence live in "
+                 f"{control_root}; `agentflow status` reaches them through AGENTFLOW_ROOT.\n") if control_root else ""
+    return f"""{CORE}{isolation}
 Pattern: {pattern.name} — {pattern.description}
 Run: {state.run_id}
 Task: {state.task}

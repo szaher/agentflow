@@ -42,6 +42,7 @@ class FakeAgentic:
         self.clean_error = clean_error
         self.metrics_error = metrics_error
         self.requirement_calls: list[tuple] = []
+        self.worktrees: dict[str, dict] = {}
         self.metrics: list[dict] = []
 
     def handshake(self):
@@ -129,9 +130,19 @@ def _requirement_methods():
         self.handshake()
         self.requirement_calls.append(("worktree-create", name, branch, base))
         path = Path(self.worktree_root or Path(root).parent / "worktrees") / name
-        subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", branch, str(path), base],
-                       check=True, capture_output=True)
+        done = subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", branch, str(path), base],
+                              capture_output=True, text=True, check=False)
+        if done.returncode:  # like agentic: exit 2, nothing created
+            raise AgenticError(f"`agentic worktree create` exited 2: {done.stderr.strip()}")
+        self.worktrees[name] = {"document_type": "agentic.worktree-status", "worktree": str(path), "branch": branch}
         return {"document_type": "agentic.worktree", "worktree": str(path), "branch": branch}
+
+    def worktree_status(self, root, name):
+        self.handshake()
+        self.requirement_calls.append(("worktree-status", name))
+        if name not in self.worktrees:
+            raise AgenticError(f"`agentic worktree status` exited 2: unknown worktree: {name}")
+        return dict(self.worktrees[name])
 
     def clean_worktree(self, root, name):
         self.handshake()

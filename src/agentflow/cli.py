@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import __version__
 from .bootstrap import BootstrapError, init_project
-from .config import load_project, save_config
+from .config import find_root, load_project, save_config
 from .engine import Engine, EngineError
 from . import provider
 from .agentic import Agentic, AgenticError, AgenticUnavailable
@@ -69,7 +69,7 @@ def cmd_provider_install(args: argparse.Namespace) -> int:
 
 
 def cmd_patterns(args: argparse.Namespace) -> int:
-    root = Path.cwd()
+    root = find_root()
     for p in list_patterns(root):
         tags = ", ".join(p.tags)
         print(f"{p.name:22} {p.description}" + (f" [{tags}]" if tags else ""))
@@ -129,24 +129,28 @@ def cmd_configure(args: argparse.Namespace) -> int:
     return 0
 
 
-def _make_state(task: str, pattern_name: str | None, agent: str | None, reviewers: str | None):
+def _make_state(task: str, pattern_name: str | None, agent: str | None, reviewers: str | None, *, save: bool = True):
+    """A new run. With ``save=False`` (``--dry-run``) it exists only in memory."""
     project = load_project()
     pattern_name = pattern_name or project.config.pattern
     pattern = load_pattern(pattern_name, project.root)
     executor = agent or project.config.executor
     revs = [x for x in reviewers.split(",") if x] if reviewers is not None else project.config.reviewers
     state = new_state(task, pattern.name, pattern.entry, executor, revs, run_start_commit=head_commit(project.root))
-    save_state(project.root, state)
+    if save:
+        save_state(project.root, state)
     return project, state
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    project, state = _make_state(args.task, args.pattern, args.agent, args.reviewers)
+    # --dry-run is non-mutating: no state, no worktree, nothing else; an existing run is left byte-identical.
+    project, state = _make_state(args.task, args.pattern, args.agent, args.reviewers, save=not args.dry_run)
     engine = Engine(project, state)
     print(f"Run {state.run_id}: pattern={state.pattern}, executor={state.executor}, reviewers={','.join(state.reviewers) or '(executor)'}")
     if args.dry_run:
         print(f"Entry stage: {state.stage}")
         for line in engine.requirements.describe(): print(f"Requires {line}")
+        print("Dry run: nothing was saved or created.")
         return 0
     try:
         status = engine.start()

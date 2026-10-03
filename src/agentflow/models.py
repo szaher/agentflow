@@ -86,6 +86,8 @@ class RunState:
     run_start_commit: str | None = None
     # The run's isolated worktree, when its pattern asks for one: name, path, branch, base, cleaned.
     worktree: dict[str, Any] | None = None
+    # True once run-start preparation (worktree, preconditions) has completed; no stage runs before.
+    started: bool = False
     plan_hash: str | None = None
     awaiting_reason: str | None = None
     history: list[dict[str, Any]] = field(default_factory=list)

@@ -24,6 +24,12 @@ from agentflow.requirements import requirements  # noqa: E402
 from agentflow.state import load_state, new_state, save_state  # noqa: E402
 
 SRC = Path(agentflow.__file__).resolve().parent
+BRIDGE = ("AGENTFLOW_ROOT", "AGENTFLOW_WORKSPACE", "AGENTFLOW_RUN_ID")
+
+
+def clean_env() -> dict:
+    import os
+    return {k: v for k, v in os.environ.items() if k not in BRIDGE}
 FAST = json.loads((SRC / "builtin_patterns" / "fast.json").read_text())
 
 
@@ -69,6 +75,39 @@ class VerificationMinimumTests(unittest.TestCase):
         self.assertEqual((plan.kinds, plan.commands), (["test"], ["make e2e"]))
 
 
+class ControlRootTests(unittest.TestCase):
+    def setUp(self):
+        from agentflow.config import save_config
+        self.tmp = Path(tempfile.mkdtemp(prefix="agentflow-root-")).resolve()
+        self.primary, self.work, self.other = self.tmp / "primary", self.tmp / "work", self.tmp / "other"
+        for d in (self.primary, self.work / "sub", self.other):
+            d.mkdir(parents=True)
+        save_config(self.primary, ProjectConfig())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def env(self, root):
+        return patch.dict("os.environ", {"AGENTFLOW_ROOT": str(root), "AGENTFLOW_WORKSPACE": str(self.work)})
+
+    def test_honoured_from_the_workspace_and_the_root(self):
+        from agentflow.config import find_root
+        with self.env(self.primary):
+            self.assertEqual(find_root(self.work / "sub"), self.primary)
+            self.assertEqual(find_root(self.primary), self.primary)
+
+    def test_ignored_outside_the_run(self):
+        from agentflow.config import find_root
+        with self.env(self.primary):
+            self.assertEqual(find_root(self.other), self.other)
+
+    def test_an_uninitialized_root_is_an_error(self):
+        from agentflow.config import find_root
+        with self.env(self.other), self.assertRaisesRegex(FileNotFoundError, "not an initialized AgentFlow project"):
+            find_root(self.work)
+
+
 class RunRequirementTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="agentflow-req-"))
@@ -88,8 +127,21 @@ class RunRequirementTests(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def commit(self) -> None:
+        git = ["git", "-C", str(self.root)]
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", "agentflow"], check=True, capture_output=True)
+
     def use(self, **extra) -> None:
+        """Install and commit a custom pattern (isolated runs start from the committed snapshot)."""
         (self.root / ".agentflow" / "patterns" / "custom.json").write_text(json.dumps({**FAST, "name": "custom", **extra}))
+        self.commit()
+
+    def new_run(self, executor: str = "claude"):
+        p = load_pattern("custom", self.root)
+        state = new_state("change", p.name, p.entry, executor, ["codex"], run_start_commit=head_commit(self.root))
+        save_state(self.root, state)
+        return state
 
     def run_pattern(self, fake: FakeAgentic, harness=None, start_commit: str | None = "head"):
         p = load_pattern("custom", self.root)
@@ -97,7 +149,7 @@ class RunRequirementTests(unittest.TestCase):
         state = new_state("change", p.name, p.entry, "claude", ["codex"], run_start_commit=commit)
         save_state(self.root, state)
         engine = Engine(load_project(self.root), state, agentic=fake)
-        with patch("agentflow.engine.get_harness", return_value=harness or FakeHarness()):
+        with patch("agentflow.engine.get_harness", return_value=harness if harness is not None else FakeHarness()):
             status = engine.start()
             if status == "running":
                 status = engine.run(max_steps=20)
@@ -205,6 +257,156 @@ class RunRequirementTests(unittest.TestCase):
                          [("agentflow.stage", "implement", "agent", "succeeded"),
                           ("agentflow.stage", "verify", "gate", "passed")])
         self.assertTrue(all(m["session_id"] == state.run_id and m["pattern"] == "custom" for m in fake.metrics))
+
+    # -- run-start lifecycle --------------------------------------------------------------------
+
+    def test_step_never_runs_a_stage_before_start_completed(self):
+        # `agentflow step` on a fresh run (never started) must prepare it first: worktree, then readiness.
+        self.use(requires={"readiness": "foundational"}, isolation={"mode": "worktree"})
+        fake, harness = FakeAgentic(worktree_root=self.tmp / "trees"), FakeHarness()
+        state = self.new_run()
+        self.assertFalse(state.started)
+        with patch("agentflow.engine.get_harness", return_value=harness):
+            Engine(load_project(self.root), load_state(self.root), agentic=fake).step()
+        state = load_state(self.root)
+        self.assertTrue(state.started)
+        self.assertEqual([c[0] for c in fake.requirement_calls], ["worktree-create", "readiness"])
+        self.assertEqual(harness.seen[0]["root"], Path(state.worktree["path"]))
+        self.assertFalse((self.root / "work.txt").exists())
+
+    def test_step_on_an_unready_fresh_run_blocks_without_running_a_stage(self):
+        self.use(requires={"readiness": "structured"})
+        harness = FakeHarness()
+        self.new_run()
+        with patch("agentflow.engine.get_harness", return_value=harness):
+            status = Engine(load_project(self.root), load_state(self.root),
+                            agentic=FakeAgentic(readiness_passed=False)).step()
+        self.assertEqual((status, harness.seen), ("blocked", []))
+
+    def test_interrupted_start_reuses_its_recorded_worktree(self):
+        self.use(isolation={"mode": "worktree"})
+        fake = FakeAgentic(worktree_root=self.tmp / "trees")
+        state = self.new_run()
+        Engine(load_project(self.root), state, agentic=fake)._ensure_worktree()  # crash before `started`
+        self.assertFalse(load_state(self.root).started)
+        resumed = Engine(load_project(self.root), load_state(self.root), agentic=fake)
+        self.assertEqual(resumed.start(), "running")
+        self.assertEqual([c[0] for c in fake.requirement_calls], ["worktree-create"])
+        self.assertTrue(load_state(self.root).started)
+
+    def test_interrupted_start_adopts_an_unrecorded_worktree_of_its_own(self):
+        self.use(isolation={"mode": "worktree"})
+        fake = FakeAgentic(worktree_root=self.tmp / "trees")
+        state = self.new_run()
+        # Created by Agentic Dev, but AgentFlow was interrupted before recording it.
+        fake.create_worktree(self.root, name=f"agentflow-{state.run_id}", branch=f"agentflow/{state.run_id}",
+                             base=state.run_start_commit)
+        engine = Engine(load_project(self.root), load_state(self.root), agentic=fake)
+        self.assertEqual(engine.start(), "running")
+        state = load_state(self.root)
+        self.assertEqual(state.worktree["path"], fake.worktrees[f"agentflow-{state.run_id}"]["worktree"])
+        self.assertTrue(any(h["event"] == "worktree_adopted" for h in state.history))
+        out = subprocess.run(["git", "-C", str(self.root), "worktree", "list"], capture_output=True, text=True,
+                             check=True).stdout
+        self.assertEqual(len(out.splitlines()), 2)  # primary + exactly one run worktree
+
+    def test_dirty_primary_checkout_blocks_isolation_and_changes_nothing(self):
+        self.use(isolation={"mode": "worktree"})
+        (self.root / "seed.txt").write_text("edited, not committed")
+        (self.root / "new_module.py").write_text("x = 1\n")
+        before = subprocess.run(["git", "-C", str(self.root), "status", "--porcelain"], capture_output=True,
+                                text=True, check=True).stdout
+        fake = FakeAgentic(worktree_root=self.tmp / "trees")
+        status, state = self.run_pattern(fake)
+        self.assertEqual(status, "blocked")
+        self.assertIn("starts from the committed run-start snapshot; commit or stash", state.awaiting_reason)
+        self.assertIn("seed.txt", state.awaiting_reason)
+        self.assertIn("new_module.py", state.awaiting_reason)
+        self.assertEqual((fake.requirement_calls, state.worktree), ([], None))
+        after = subprocess.run(["git", "-C", str(self.root), "status", "--porcelain"], capture_output=True,
+                               text=True, check=True).stdout
+        self.assertEqual(after, before)  # nothing copied, stashed, or committed
+
+    def test_a_dirty_checkout_is_fine_without_isolation(self):
+        self.use()
+        (self.root / "seed.txt").write_text("edited, not committed")
+        self.assertEqual(self.run_pattern(FakeAgentic())[0], "complete")
+
+    def test_dry_run_saves_nothing(self):
+        import contextlib
+        import io
+        import os
+        from agentflow import cli
+        self.use(requires={"readiness": "foundational"}, isolation={"mode": "worktree"})
+        state_file = self.root / ".agentflow" / "state.json"
+        cwd = os.getcwd()
+        os.chdir(self.root)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(cli.main(["run", "first", "--pattern", "custom", "--dry-run"]), 0)
+            self.assertFalse(state_file.exists())
+            self.assertIn("nothing was saved", out.getvalue())
+            self.new_run()
+            existing = state_file.read_bytes()
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli.main(["run", "second", "--pattern", "custom", "--dry-run"])
+            self.assertEqual(state_file.read_bytes(), existing)
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(len(subprocess.run(["git", "-C", str(self.root), "worktree", "list"], capture_output=True,
+                                            text=True, check=True).stdout.splitlines()), 1)
+
+    # -- control-root bridge -------------------------------------------------------------------
+
+    def test_isolated_harnesses_get_the_control_root_and_absolute_evidence_paths(self):
+        self.use(isolation={"mode": "worktree"})
+        harness = FakeHarness()
+        _, state = self.run_pattern(FakeAgentic(status="failed", worktree_root=self.tmp / "trees"), harness)
+        tree = Path(state.worktree["path"])
+        self.assertEqual(harness.seen[0]["env"], {"AGENTFLOW_ROOT": str(self.root.resolve()),
+                                                  "AGENTFLOW_WORKSPACE": str(tree), "AGENTFLOW_RUN_ID": state.run_id})
+        second = harness.seen[1]["prompt"]  # the retry after a failed gate lists prior evidence
+        paths = [line.split(": ", 1)[1] for line in second.splitlines() if line.startswith(("- agent: ", "- gates: "))]
+        self.assertTrue(paths)
+        for path in paths:
+            self.assertTrue(Path(path).is_absolute() and Path(path).exists(), path)
+        self.assertIn(f"AgentFlow state and evidence live in {self.root.resolve()}", second)
+
+    def test_status_from_inside_the_worktree_reaches_the_primary_run(self):
+        # A real child process, launched by AgentFlow's own harness adapter in the worktree.
+        from agentflow.config import save_config
+        probe = (f"PYTHONPATH={SRC.parent} {sys.executable} -m agentflow.cli status; echo cwd=$(pwd -P)")
+        config = load_project(self.root).config
+        config.harness = {"probe": {"command": ["sh", "-c", probe, "{prompt}"]}}
+        save_config(self.root, config)
+        self.use(isolation={"mode": "worktree"})
+        fake = FakeAgentic(worktree_root=self.tmp / "trees")
+        state = self.new_run(executor="probe")
+        engine = Engine(load_project(self.root), state, agentic=fake)
+        with patch.dict("os.environ", clean_env(), clear=True):
+            engine.step()
+        state = load_state(self.root)
+        evidence = json.loads((self.root / next(e["path"] for e in state.evidence if e["kind"] == "agent")).read_text())
+        self.assertIn(f"run:       {state.run_id}", evidence["stdout"])
+        self.assertIn(f"worktree:  {state.worktree['path']}", evidence["stdout"])
+        self.assertIn(f"cwd={Path(state.worktree['path']).resolve()}", evidence["stdout"])
+        # Without the bridge, the same command in the worktree finds no run (control check).
+        lost = subprocess.run([sys.executable, "-m", "agentflow.cli", "status"], cwd=state.worktree["path"],
+                              env={**clean_env(), "PYTHONPATH": str(SRC.parent)}, capture_output=True, text=True,
+                              check=False)
+        self.assertNotEqual(lost.returncode, 0)
+        self.assertIn("No active Agentflow run", lost.stderr)
+
+    def test_metrics_unavailable_is_recorded_once_per_run_across_invocations(self):
+        self.use()
+        fake = FakeAgentic(metrics_error="installed `agentic` lacks metric-record@1")
+        self.new_run()
+        with patch("agentflow.engine.get_harness", return_value=FakeHarness()):
+            for _ in range(2):  # two separate `agentflow step` invocations
+                Engine(load_project(self.root), load_state(self.root), agentic=fake).step()
+        state = load_state(self.root)
+        self.assertEqual(state.status, "complete")
+        self.assertEqual(len(self.events(state, "metrics_unavailable")), 1)
 
     def test_metrics_problems_never_change_the_outcome(self):
         self.use()

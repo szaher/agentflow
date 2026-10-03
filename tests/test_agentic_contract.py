@@ -283,6 +283,9 @@ class RequirementContractTests(unittest.TestCase):
                            / "fast.json").read_text())
         (self.root / ".agentflow" / "patterns" / "custom.json").write_text(
             json.dumps({**fast, "name": "custom", **requirements}))
+        git = ["git", "-C", str(self.root), "-c", "user.email=t@example.com", "-c", "user.name=T"]
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", "agentflow"], check=True, capture_output=True)
         p = load_pattern("custom", self.root)
         state = new_state("change", p.name, p.entry, "claude", [], run_start_commit=head_commit(self.root))
         save_state(self.root, state)
@@ -308,7 +311,28 @@ class RequirementContractTests(unittest.TestCase):
                                                 if e["kind"] == "precondition")).read_text())
         jsonschema.validate(evidence["document"], self.schema("readiness-verification"))
         self.assertEqual((evidence["document"]["scope"], evidence["document"]["passed"]), ("local", False))
-        self.assertEqual(sorted(p.name for p in self.root.iterdir()), [".agentflow", ".git", ".opencode", "app.py"])
+        self.assertEqual(subprocess.run(["git", "-C", str(self.root), "status", "--porcelain"], capture_output=True,
+                                        text=True, check=True).stdout, "")  # primary checkout untouched
+
+    def test_interrupted_start_adopts_the_real_worktree_instead_of_creating_another(self):
+        from agentflow.config import load_project
+        from agentflow.engine import Engine
+        from agentflow.state import load_state
+        self.run_pattern(isolation={"mode": "worktree"})  # installs and commits the pattern
+        state = load_state(self.root)
+        # A second run whose worktree Agentic Dev created but AgentFlow never recorded.
+        from agentflow.git import head_commit
+        from agentflow.state import new_state, save_state
+        fresh = new_state("again", "custom", state.stage, "claude", [], run_start_commit=head_commit(self.root))
+        save_state(self.root, fresh)
+        Agentic(AGENTIC).create_worktree(self.root, name=f"agentflow-{fresh.run_id}",
+                                         branch=f"agentflow/{fresh.run_id}", base=fresh.run_start_commit)
+        self.assertEqual(Engine(load_project(self.root), load_state(self.root), agentic=Agentic(AGENTIC)).start(),
+                         "running")
+        adopted = load_state(self.root)
+        self.assertTrue(adopted.started)
+        self.assertTrue(any(h["event"] == "worktree_adopted" for h in adopted.history))
+        self.assertTrue(Path(adopted.worktree["path"]).is_dir())
 
     def test_unknown_capability_blocks(self):
         status, state = self.run_pattern(requires={"capabilities": ["no-such-capability"]})
