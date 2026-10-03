@@ -1,0 +1,20 @@
+{
+  "schema_version": "1",
+  "name": "agentflow",
+  "version": "0.1.0",
+  "description": "AgentFlow's Agentic SDLC skill, placed and activated by Agentic Dev.",
+  "skills": [
+    {
+      "name": "agentflow-sdlc",
+      "category": "workflow",
+      "path": "skills/agentflow-sdlc",
+      "description": "Execute work under the repository's AgentFlow SDLC pattern: stages, verification, reviews, evidence, and approval gates.",
+      "task_keywords": [
+        "agentflow",
+        "sdlc",
+        "workflow"
+      ],
+      "priority": 1
+    }
+  ]
+}

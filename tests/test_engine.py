@@ -49,7 +49,7 @@ class EngineTests(unittest.TestCase):
         td,root=self.repo()
         try:
             cfg=ProjectConfig(pattern="fast",executor="claude",reviewers=["codex"],gates={"fast":["python -c 'print(1)'"]})
-            init_project(root,cfg)
+            init_project(root,cfg, agentic=FakeAgentic())
             p=load_pattern("fast",root)
             st=new_state("change",p.name,p.entry,"claude",["codex"]); save_state(root,st)
             with patch("agentflow.engine.get_harness", return_value=FakeHarness()):
@@ -64,7 +64,7 @@ class EngineTests(unittest.TestCase):
         td,root=self.repo()
         try:
             cfg=ProjectConfig(pattern="pair-review",executor="claude",reviewers=["codex"],gates={"standard":["python -c 'print(1)'"]})
-            init_project(root,cfg)
+            init_project(root,cfg, agentic=FakeAgentic())
             p=load_pattern("pair-review",root)
             st=new_state("change",p.name,p.entry,"claude",["codex"]); save_state(root,st)
             fake=MutatingReviewer()
@@ -76,7 +76,7 @@ class EngineTests(unittest.TestCase):
     def run_fast(self, agentic):
         td,root=self.repo()
         self.addCleanup(td.cleanup)
-        init_project(root,ProjectConfig(pattern="fast",executor="claude",reviewers=["codex"]))
+        init_project(root,ProjectConfig(pattern="fast",executor="claude",reviewers=["codex"]), agentic=FakeAgentic())
         p=load_pattern("fast",root)
         st=new_state("change",p.name,p.entry,"claude",["codex"],run_start_commit=head_commit(root)); save_state(root,st)
         with patch("agentflow.engine.get_harness", return_value=FakeHarness()):
@@ -145,7 +145,7 @@ class VerifyCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as tool:
             root=Path(td)
             subprocess.run(["git","init","-q",str(root)],check=True)
-            init_project(root,ProjectConfig())
+            init_project(root,ProjectConfig(), agentic=FakeAgentic())
             save_state(root,new_state("t","fast","implement","claude",[],run_start_commit="b"*40))
             env={**os.environ,"PYTHONPATH":str(Path(__file__).resolve().parents[1]/"src"),
                  "AGENTFLOW_AGENTIC":fake_cli(Path(tool))}

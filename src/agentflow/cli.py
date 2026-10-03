@@ -8,10 +8,11 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .bootstrap import init_project
+from .bootstrap import BootstrapError, init_project
 from .config import load_project, save_config
 from .engine import Engine, EngineError
-from .agentic import Agentic, AgenticError
+from . import provider
+from .agentic import Agentic, AgenticError, AgenticUnavailable
 from .gates import plan_gate, run_gates
 from .git import head_commit, implementation_fingerprint
 from .harnesses import detected as detect_harnesses, names as harness_names
@@ -26,10 +27,43 @@ def cmd_init(args: argparse.Namespace) -> int:
         root.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
     cfg = ProjectConfig(pattern=args.pattern, executor=args.agent, reviewers=args.reviewers.split(",") if args.reviewers else ["codex"])
-    paths = init_project(root, cfg, force=args.force)
+    try:
+        result = init_project(root, cfg, force=args.force, install_provider=not args.no_provider_install,
+                              replace_provider=args.update_provider)
+    except AgenticUnavailable as exc:
+        print(f"agentflow: {exc}", file=sys.stderr); return 2
+    except (BootstrapError, AgenticError) as exc:
+        print(f"agentflow: {exc}", file=sys.stderr); return 1
     print(f"Initialized Agentflow in {root}")
     print(f"Pattern: {cfg.pattern} | executor: {cfg.executor} | reviewers: {', '.join(cfg.reviewers)}")
-    print(f"Generated {len(paths)} integration files")
+    print(f"Provider {provider.PROVIDER_NAME}: {result.provider_action} (was {result.provider_state})")
+    for block in result.blocks:
+        print(f"Block {block['block_id']} in {block['file']}: {block['status']}")
+    placed = sorted({o["harness"] for o in (result.skills or {}).get("outcomes", [])})
+    print(f"Skill {provider.SKILL_NAME} via agentic-dev: {', '.join(placed)}")
+    return 0
+
+
+def cmd_provider_status(args: argparse.Namespace) -> int:
+    try:
+        current = provider.status(Agentic())
+    except AgenticError as exc:
+        print(f"agentflow: {exc}", file=sys.stderr); return 2
+    if args.json:
+        print(json.dumps(current.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(f"{provider.PROVIDER_NAME}: {current.state} — {provider.explain(current)}")
+    return 0 if current.state == provider.CURRENT else 1
+
+
+def cmd_provider_install(args: argparse.Namespace) -> int:
+    try:
+        action, before = provider.ensure(Agentic(), install=True, replace=args.replace)
+    except AgenticError as exc:
+        print(f"agentflow: {exc}", file=sys.stderr); return 2
+    except provider.ProviderError as exc:
+        print(f"agentflow: {exc}", file=sys.stderr); return 1
+    print(f"{provider.PROVIDER_NAME}: {action} (was {before.state})")
     return 0
 
 
@@ -41,8 +75,16 @@ def cmd_patterns(args: argparse.Namespace) -> int:
     return 0
 
 
+def _harness_facts() -> dict[str, bool]:
+    return detect_harnesses(Agentic().doctor().get("tools") or {})
+
+
 def cmd_detect(args: argparse.Namespace) -> int:
-    for name, ok in detect_harnesses().items():
+    try:
+        statuses = _harness_facts()
+    except AgenticError as exc:
+        print(f"agentflow: {exc}", file=sys.stderr); return 2
+    for name, ok in statuses.items():
         print(f"{'✓' if ok else '○'} {name}")
     return 0
 
@@ -51,16 +93,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     project = load_project()
     print(f"Project: {project.root}")
     print(f"Pattern: {project.config.pattern}")
-    statuses = detect_harnesses()
-    for name, ok in statuses.items(): print(f"{'✓' if ok else '○'} harness {name}")
     pattern = load_pattern(project.config.pattern, project.root)
     print(f"✓ pattern valid: {pattern.name} ({len(pattern.stages)} stages)")
     try:
         agentic = Agentic()
+        statuses = detect_harnesses(agentic.doctor().get("tools") or {})
         gp = plan_gate(project.root, project.config, project.config.gate_profile, agentic=agentic)
         discovered = agentic.discovered_kinds(project.root) if gp.kinds else set()
+        current = provider.status(agentic)
     except AgenticError as exc:
         print(f"✗ agentic-dev: {exc}"); return 2
+    for name, ok in statuses.items(): print(f"{'✓' if ok else '○'} harness {name}")
+    print(f"{'✓' if current.state == provider.CURRENT else '✗'} provider {provider.PROVIDER_NAME}: {current.state}"
+          + ("" if current.state == provider.CURRENT else f" — {provider.explain(current)}"))
     if gp.commands:
         print(f"✓ gates ({gp.profile}) via agentic-dev, explicit: " + "; ".join(gp.commands))
     for kind in gp.kinds:
@@ -170,7 +215,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agentflow", description="Agentic SDLC meta-harness")
     p.add_argument("--version", action="version", version=f"agentflow {__version__}")
     sp = p.add_subparsers(dest="cmd", required=True)
-    q=sp.add_parser("init"); q.add_argument("path", nargs="?", default="."); q.add_argument("--pattern", default="standard"); q.add_argument("--agent", default="claude"); q.add_argument("--reviewers", default="codex"); q.add_argument("--init-git", action="store_true"); q.add_argument("--force", action="store_true"); q.set_defaults(func=cmd_init)
+    q=sp.add_parser("init"); q.add_argument("path", nargs="?", default="."); q.add_argument("--pattern", default="standard"); q.add_argument("--agent", default="claude"); q.add_argument("--reviewers", default="codex"); q.add_argument("--init-git", action="store_true"); q.add_argument("--force", action="store_true", help="refresh AgentFlow's own files and blocks (never rewrites shared files)")
+    q.add_argument("--update-provider", "--replace-provider", dest="update_provider", action="store_true", help="replace an installed agentflow provider that differs from this AgentFlow's")
+    q.add_argument("--no-provider-install", action="store_true", help="never install or replace the global agentflow provider; fail unless it is already current")
+    q.set_defaults(func=cmd_init)
+    q=sp.add_parser("provider", help="The agentflow provider (agentflow-sdlc skill) installed through Agentic Dev"); psub=q.add_subparsers(dest="provider_command", required=True)
+    r=psub.add_parser("status"); r.add_argument("--json", action="store_true"); r.set_defaults(func=cmd_provider_status)
+    r=psub.add_parser("install"); r.add_argument("--replace", action="store_true", help="replace an installed agentflow provider that differs"); r.set_defaults(func=cmd_provider_install)
     q=sp.add_parser("patterns"); q.set_defaults(func=cmd_patterns)
     q=sp.add_parser("detect"); q.set_defaults(func=cmd_detect)
     q=sp.add_parser("doctor"); q.set_defaults(func=cmd_doctor)
