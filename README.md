@@ -19,7 +19,7 @@ It does not replace Claude Code, Codex, Pi, OpenCode, or another coding agent. T
 - Independent read-only review with post-run worktree mutation detection.
 - Risk-sensitive human approval support.
 - Cross-harness review: e.g. Claude implements, Codex and Pi review.
-- Generated `AGENTS.md`, `CLAUDE.md`, and Agent Skills for compatible harnesses.
+- `AGENTS.md`/`CLAUDE.md` workflow blocks and the `agentflow-sdlc` skill, placed through Agentic Dev (managed blocks and its provider/skill mechanism).
 - OpenCode read-only reviewer configuration.
 - Unit tests using only the Python standard library, plus contract tests against the installed `agentic` CLI (jsonschema, test-only).
 
@@ -56,10 +56,26 @@ agentflow init --init-git --pattern standard --agent claude --reviewers codex,pi
 agentflow doctor
 ```
 
+`agentflow init` sets the project up through Agentic Dev and never rewrites shared files:
+
+- **Instructions:** AgentFlow's workflow text goes into one managed block, `agentflow.workflow`, in `AGENTS.md` and `CLAUDE.md`, placed by `agentic instructions block put`. Existing content is preserved byte for byte, re-running is a no-op, and a block you edited by hand stops `init` instead of being overwritten (`--force` included).
+- **Skill:** the `agentflow-sdlc` skill ships as an Agentic Dev *provider* bundled with AgentFlow. Agentic Dev installs it and places it for Claude Code, Codex, Pi, and OpenCode (`agentic skills add --shared`).
+- **Files AgentFlow owns:** `.agentflow/` and the OpenCode reviewer agent `.opencode/agents/agentflow-reviewer.md`.
+
+The provider lives in your global Agentic Dev registry, so `init` is careful with it:
+
+| Installed `agentflow` provider | `agentflow init` |
+|---|---|
+| missing | installs the one bundled with this AgentFlow |
+| identical (same content digest, verified) | nothing to do |
+| different (another AgentFlow version), or failing verification | **stops**; nothing is changed |
+
+Replace a different provider only on purpose: `agentflow provider install --replace` or `agentflow init --update-provider`. With `--no-provider-install`, `init` never touches global state and fails unless the provider is already current. `agentflow provider status` shows where you stand.
+
 Commit the generated project integration files before beginning real work:
 
 ```bash
-git add AGENTS.md CLAUDE.md .agentflow .agents .claude .codex .pi .opencode
+git add AGENTS.md CLAUDE.md .agentflow .agentic .claude .codex .pi .opencode
 git commit -m "chore: enable Agentflow"
 ```
 
@@ -304,7 +320,9 @@ Supported stage kinds are `agent`, `gate`, `review`, `human`, and `noop`.
 ```text
 agentflow init [PATH]             initialize a repository
 agentflow patterns               list built-in + project patterns
-agentflow detect                 detect installed first-class harnesses
+agentflow detect                 detect installed first-class harnesses (via agentic doctor)
+agentflow provider status        is the agentflow provider (agentflow-sdlc skill) current?
+agentflow provider install       install it if missing (--replace to replace a different one)
 agentflow doctor                 validate project integration
 agentflow configure              update common project settings
 agentflow run TASK               create and execute a run

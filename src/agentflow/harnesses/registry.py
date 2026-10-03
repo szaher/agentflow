@@ -5,7 +5,6 @@ from .claude import ClaudeHarness
 from .codex import CodexHarness
 from .pi import PiHarness
 from .opencode import OpenCodeHarness
-from ..util import which
 from .custom import CommandHarness
 
 _REGISTRY: dict[str, type[Harness]] = {
@@ -28,5 +27,6 @@ def get(name: str, config: dict | None = None) -> Harness:
     raise KeyError(f"Unknown harness {name!r}; configure a custom command under .agentflow/config.json -> harness.{name}.command")
 
 
-def detected() -> dict[str, bool]:
-    return {name: bool(which(cls.executable)) for name, cls in _REGISTRY.items()}
+def detected(tools: dict[str, dict]) -> dict[str, bool]:
+    """Harness availability from Agentic Dev's doctor ``tools`` facts (AgentFlow does not probe PATH)."""
+    return {name: bool((tools.get(cls.executable) or {}).get("available")) for name, cls in _REGISTRY.items()}

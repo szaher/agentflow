@@ -26,7 +26,7 @@ from typing import Any
 
 INSTALL_HINT = "install Agentic Dev (https://github.com/szaher/agentic-dev) so `agentic` is on PATH, or set AGENTFLOW_AGENTIC"
 
-# What AgentFlow consumes. Checked against `agentic contracts --json`.
+# What AgentFlow consumes, per operation. Checked against `agentic contracts --json`.
 REQUIRED_CONTRACTS = {"contracts": "1", "repo-inspection": "1", "verification-run": "1"}
 REQUIRED_FEATURES = (
     "commands.canonical-discovery",
@@ -36,6 +36,11 @@ REQUIRED_FEATURES = (
     "verification.no-checks-status",
 )
 CHANGE_AWARE_FEATURE = "verification.change-aware"
+BOOTSTRAP_CONTRACTS = {"contracts": "1", "provider-source": "1", "providers": "1", "provider-install": "1",
+                       "skills-activation": "1", "instruction-block": "1"}
+BOOTSTRAP_FEATURES = ("instructions.managed-block", "providers.inspect", "providers.install-pinned",
+                      "skills.activation-report")
+DOCTOR_CONTRACTS = {"contracts": "1", "doctor": "1"}
 VERIFY_STATUSES = ("passed", "failed", "no-checks")
 
 
@@ -54,12 +59,13 @@ class Agentic:
         self._contracts: dict[str, Any] | None = None
         self._schemas: dict[str, dict[str, Any]] = {}
 
-    def _call(self, args: list[str], cwd: Path | None = None, ok: tuple[int, ...] = (0,)) -> tuple[int, dict[str, Any]]:
+    def _call(self, args: list[str], cwd: Path | None = None, ok: tuple[int, ...] = (0,),
+              stdin: str | None = None) -> tuple[int, dict[str, Any]]:
         if not self.executable:
             raise AgenticUnavailable(f"`agentic` was not found; {INSTALL_HINT}")
         try:
             cp = subprocess.run([self.executable, *args], cwd=str(cwd) if cwd else None, text=True,
-                                capture_output=True, timeout=self.timeout)
+                                input=stdin, capture_output=True, timeout=self.timeout)
         except OSError as exc:
             raise AgenticUnavailable(f"cannot run {self.executable}: {exc}; {INSTALL_HINT}") from exc
         if cp.returncode not in ok:
@@ -89,9 +95,7 @@ class Agentic:
             raise AgenticError(f"`agentic` returned an invalid {contract} document ({where}: {exc.message})") from exc
         return document
 
-    def handshake(self) -> dict[str, Any]:
-        """The contracts document, after checking everything AgentFlow requires is offered."""
-
+    def _contracts_document(self) -> dict[str, Any]:
         if self._contracts is not None:
             return self._contracts
         try:
@@ -108,17 +112,24 @@ class Agentic:
             raise  # already explains itself (for example jsonschema missing)
         except AgenticError as exc:
             raise AgenticUnavailable(f"{exc}; {INSTALL_HINT}") from exc
-        offered = document.get("contracts") or {}
-        missing = [f"{name}@{version}" for name, version in REQUIRED_CONTRACTS.items()
-                   if version not in (offered.get(name) or [])]
-        missing += [f"feature {feature}" for feature in REQUIRED_FEATURES if feature not in (document.get("features") or [])]
-        if missing:
-            raise AgenticUnavailable(f"installed `agentic` lacks {', '.join(missing)}; {INSTALL_HINT}")
         self._contracts = document
         return document
 
+    def handshake(self, contracts: dict[str, str] = REQUIRED_CONTRACTS,
+                  features: tuple[str, ...] = REQUIRED_FEATURES) -> dict[str, Any]:
+        """The contracts document, after checking it offers ``contracts`` and ``features``."""
+
+        document = self._contracts_document()
+        offered = document.get("contracts") or {}
+        missing = [f"{name}@{version}" for name, version in contracts.items()
+                   if version not in (offered.get(name) or [])]
+        missing += [f"feature {feature}" for feature in features if feature not in (document.get("features") or [])]
+        if missing:
+            raise AgenticUnavailable(f"installed `agentic` lacks {', '.join(missing)}; {INSTALL_HINT}")
+        return document
+
     def supports(self, feature: str) -> bool:
-        return feature in (self.handshake().get("features") or [])
+        return feature in (self._contracts_document().get("features") or [])
 
     def discovered_kinds(self, root: Path) -> set[str]:
         """Command kinds Agentic Dev discovers for the repository (repo-inspection v1)."""
@@ -152,3 +163,65 @@ class Agentic:
         if code != expected_exit:
             raise AgenticError(f"`agentic verify run` status {document['status']} disagrees with exit {code}")
         return document
+
+    # -- bootstrap: provider installation, skill activation, instruction blocks --------------
+
+    def _bootstrap(self) -> None:
+        self.handshake(BOOTSTRAP_CONTRACTS, BOOTSTRAP_FEATURES)
+
+    def inspect_provider(self, source: Path) -> dict[str, Any]:
+        """Describe a provider source as installation would record it (provider-source v1)."""
+
+        self._bootstrap()
+        _, document = self._call(["providers", "inspect", str(source), "--json"])
+        return self._validated("provider-source", document)
+
+    def providers(self) -> list[dict[str, Any]]:
+        self._bootstrap()
+        _, document = self._call(["providers", "list", "--json"])
+        return self._validated("providers", document)["providers"]
+
+    def add_provider(self, source: Path, *, sha256: str) -> dict[str, Any]:
+        """Install a provider pinned to ``sha256``. Replaces a provider of the same name: callers decide."""
+
+        self._bootstrap()
+        _, document = self._call(["providers", "add", str(source), "--sha256", sha256, "--json"])
+        return self._validated("provider-install", document)
+
+    def activate_skills(self, root: Path, names: list[str], *, target: str = "all",
+                        shared: bool = True) -> dict[str, Any]:
+        """Place skills in the repository (skills-activation v1). Exit 1 (conflict) is a result."""
+
+        self._bootstrap()
+        args = ["skills", "add", *names, "--path", str(root), "--target", target, "--json"]
+        if shared:
+            args.append("--shared")
+        code, document = self._call(args, cwd=root, ok=(0, 1))
+        self._validated("skills-activation", document)
+        if code != document["exit_code"]:
+            raise AgenticError(f"`agentic skills add` status {document['status']} disagrees with exit {code}")
+        return document
+
+    def put_block(self, root: Path, *, file: str, owner: str, block: str, content: str,
+                  dry_run: bool = False) -> dict[str, Any]:
+        """Place or update a managed block (instruction-block v1). Conflict/refusal (exit 1) is a result."""
+
+        self._bootstrap()
+        args = ["instructions", "block", "put", "--path", str(root), "--file", file, "--owner", owner,
+                "--id", block, "--content-file", "-", "--json"]
+        if dry_run:
+            args.append("--dry-run")
+        code, document = self._call(args, cwd=root, ok=(0, 1, 3), stdin=content)
+        self._validated("instruction-block", document)
+        if code != document["exit_code"]:
+            raise AgenticError(f"`agentic instructions block put` status {document['status']} disagrees with exit {code}")
+        return document
+
+    # -- environment facts --------------------------------------------------------------------
+
+    def doctor(self) -> dict[str, Any]:
+        """Workstation tool and integration facts (doctor v1)."""
+
+        self.handshake(DOCTOR_CONTRACTS, ())
+        _, document = self._call(["doctor", "--json"])
+        return self._validated("doctor", document)

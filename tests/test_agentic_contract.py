@@ -109,5 +109,120 @@ class AgenticContractTests(unittest.TestCase):
         self.assertEqual(gate.verification["missing_kinds"], ["test", "lint", "typecheck"])
 
 
+@unittest.skipUnless(AGENTIC and jsonschema, "needs an installed `agentic` and jsonschema")
+class BootstrapContractTests(unittest.TestCase):
+    """agentflow init against the real agentic, with an isolated global provider registry."""
+
+    def setUp(self):
+        from agentflow import provider
+        self.provider = provider
+        self.tmp = Path(tempfile.mkdtemp(prefix="agentflow-bootstrap-"))
+        self.saved = {k: os.environ.get(k) for k in ("AGENTIC_DEV_CONFIG_DIR", "AGENTFLOW_PROVIDER_SOURCE")}
+        os.environ["AGENTIC_DEV_CONFIG_DIR"] = str(self.tmp / "config")
+        bundled = provider.bundled_source()
+        self.version_a = self.tmp / "provider-a"
+        shutil.copytree(bundled, self.version_a)
+        self.version_b = self.tmp / "provider-b"
+        shutil.copytree(bundled, self.version_b)
+        skill = self.version_b / "skills" / "agentflow-sdlc" / "SKILL.md"
+        skill.write_text(skill.read_text() + "\nA different AgentFlow build.\n")
+        self.agentic = Agentic(AGENTIC)
+
+    def tearDown(self):
+        for key, value in self.saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def use(self, source: Path) -> None:
+        os.environ["AGENTFLOW_PROVIDER_SOURCE"] = str(source)
+
+    def repo(self, name: str = "repo") -> Path:
+        root = self.tmp / name
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        return root
+
+    def installed_digest(self) -> str | None:
+        entry = next((p for p in Agentic(AGENTIC).providers() if p["name"] == "agentflow"), None)
+        return entry["content_digest"] if entry else None
+
+    def digest(self, source: Path) -> str:
+        return Agentic(AGENTIC).inspect_provider(source)["content_digest"]
+
+    def test_init_places_blocks_and_skills_through_agentic(self):
+        from agentflow.bootstrap import init_project
+        self.use(self.version_a)
+        root = self.repo()
+        (root / "AGENTS.md").write_text("# Team notes\n\nKeep this exactly.\n")
+        result = init_project(root, ProjectConfig(), agentic=self.agentic)
+        self.assertEqual((result.provider_action, self.installed_digest()), ("installed", self.digest(self.version_a)))
+        self.assertTrue((root / "AGENTS.md").read_text().startswith("# Team notes\n\nKeep this exactly.\n\n"))
+        for harness in (".claude", ".codex", ".pi", ".opencode"):
+            self.assertTrue((root / harness / "skills" / "agentflow-sdlc" / "SKILL.md").exists(), harness)
+        listed = json.loads(subprocess.run([AGENTIC, "instructions", "block", "list", "--path", str(root), "--json"],
+                                           capture_output=True, text=True, check=True).stdout)
+        jsonschema.validate(listed, self.schema("instruction-block-list"))
+        self.assertEqual({(b["file"], b["block_id"], b["intact"]) for b in listed["blocks"]},
+                         {("AGENTS.md", "agentflow.workflow", True), ("CLAUDE.md", "agentflow.workflow", True)})
+        before = (root / "AGENTS.md").read_bytes()
+        again = init_project(root, ProjectConfig(), force=True, agentic=Agentic(AGENTIC))
+        self.assertEqual(([b["status"] for b in again.blocks], again.provider_action), (["unchanged", "unchanged"], "unchanged"))
+        self.assertEqual((root / "AGENTS.md").read_bytes(), before)
+
+    def schema(self, name: str) -> dict:
+        return json.loads(subprocess.run([AGENTIC, "contracts", "schema", name], capture_output=True, text=True,
+                                         check=True).stdout)
+
+    def assert_no_silent_replacement(self, installed: Path, incoming: Path) -> None:
+        from agentflow.bootstrap import BootstrapError, init_project
+        self.use(installed)
+        init_project(self.repo("first"), ProjectConfig(), agentic=Agentic(AGENTIC))
+        self.assertEqual(self.installed_digest(), self.digest(installed))
+        self.use(incoming)
+        second = self.repo("second")
+        with self.assertRaisesRegex(BootstrapError, "--update-provider"):
+            init_project(second, ProjectConfig(), agentic=Agentic(AGENTIC))
+        self.assertEqual(self.installed_digest(), self.digest(installed))  # global provider untouched
+        self.assertEqual(list(second.iterdir()), [second / ".git"])          # repository untouched
+        result = init_project(second, ProjectConfig(), agentic=Agentic(AGENTIC), replace_provider=True)
+        self.assertEqual((result.provider_action, self.installed_digest()), ("replaced", self.digest(incoming)))
+
+    def test_older_agentflow_cannot_silently_downgrade_a_newer_provider(self):
+        self.assert_no_silent_replacement(installed=self.version_b, incoming=self.version_a)
+
+    def test_newer_agentflow_needs_explicit_intent_to_replace(self):
+        self.assert_no_silent_replacement(installed=self.version_a, incoming=self.version_b)
+
+    def test_no_provider_install_never_mutates_global_state(self):
+        from agentflow.bootstrap import BootstrapError, init_project
+        self.use(self.version_a)
+        root = self.repo()
+        with self.assertRaisesRegex(BootstrapError, "disabled"):
+            init_project(root, ProjectConfig(), agentic=Agentic(AGENTIC), install_provider=False)
+        self.assertIsNone(self.installed_digest())
+        self.assertEqual(list(root.iterdir()), [root / ".git"])
+
+    def test_hand_edited_block_stops_init_before_any_write(self):
+        from agentflow.bootstrap import BootstrapError, init_project
+        self.use(self.version_a)
+        root = self.repo()
+        init_project(root, ProjectConfig(), agentic=Agentic(AGENTIC))
+        agents = root / "AGENTS.md"
+        agents.write_text(agents.read_text().replace("Work only on", "Mostly work on"))
+        config = (root / ".agentflow" / "config.json").read_bytes()
+        snapshot = agents.read_bytes()
+        with self.assertRaisesRegex(BootstrapError, "edited by hand"):
+            init_project(root, ProjectConfig(pattern="tdd"), force=True, agentic=Agentic(AGENTIC))
+        self.assertEqual((agents.read_bytes(), (root / ".agentflow" / "config.json").read_bytes()), (snapshot, config))
+
+    def test_doctor_facts(self):
+        from agentflow.harnesses import detected
+        document = Agentic(AGENTIC).doctor()
+        jsonschema.validate(document, self.schema("doctor"))
+        self.assertEqual(set(detected(document["tools"])), {"claude", "codex", "pi", "opencode"})
+
+
 if __name__ == "__main__":
     unittest.main()

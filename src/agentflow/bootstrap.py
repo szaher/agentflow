@@ -1,84 +1,63 @@
+"""``agentflow init``: AgentFlow's project integration, placed through Agentic Dev.
+
+Ownership (v0.16 decisions 4 and 5):
+
+- AgentFlow owns its instruction *content* and the ``agentflow-sdlc`` skill
+  content. Agentic Dev owns the mutation of shared files: the workflow text goes
+  into one managed block (``agentflow.workflow``) in ``AGENTS.md`` and
+  ``CLAUDE.md`` through ``agentic instructions block put``. Shared instruction
+  files are never rewritten wholesale, ``--force`` included; a hand-edited block
+  is a conflict, not something to overwrite.
+- The skill reaches every harness through Agentic Dev's provider + skill
+  mechanism (see :mod:`agentflow.provider`); AgentFlow no longer writes copies.
+- Files AgentFlow owns outright (``.agentflow/config.json``, ``.agentflow/.gitignore``,
+  the OpenCode reviewer agent) are written atomically by AgentFlow.
+
+Everything that can fail is checked before the repository is touched: the
+Agentic Dev handshake, the provider policy, and a dry run of both blocks.
+"""
+
 from __future__ import annotations
 
-import json
+import os
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
+from . import provider
+from .agentic import Agentic
 from .config import save_config
 from .models import ProjectConfig
 
-AGENTS = """# Agentflow project instructions
+OWNER = "agentflow"
+BLOCK = "workflow"
 
-This repository uses Agentflow, an Agentic SDLC meta-harness.
+AGENTS_BLOCK = """## AgentFlow workflow
 
-## Mandatory workflow
-- Read `.agentflow/config.json` and follow the selected Agentflow pattern.
+This repository uses AgentFlow, an Agentic SDLC meta-harness.
+
+- Read `.agentflow/config.json` and follow the selected AgentFlow pattern.
 - Work only on the current bounded stage/checkpoint.
 - Do not claim the overall task is complete merely because implementation finished.
-- Run `agentflow status` to inspect workflow state.
-- Run `agentflow verify` when verification is required.
+- Run `agentflow status` to inspect workflow state, and `agentflow verify` when verification is required.
 - Independent review must be read-only; reviewers must not edit files.
 - Preserve unrelated user changes. Never use destructive Git commands to erase unknown work.
-- Agentflow evidence is tied to the current repository fingerprint; code changes can stale previous evidence.
+- AgentFlow evidence is tied to the current repository fingerprint; code changes can stale previous evidence.
 
-## Useful commands
-- `agentflow patterns`
-- `agentflow status`
-- `agentflow verify`
-- `agentflow step`
-- `agentflow approve`
+Useful AgentFlow commands: `agentflow patterns`, `agentflow status`, `agentflow verify`, `agentflow step`, `agentflow approve`.
 """
 
-SKILL = """---
-name: agentflow-sdlc
-description: Execute software development work under the repository's Agentflow SDLC pattern, including stages, verification, reviews, evidence, and approval gates.
----
+CLAUDE_BLOCK = """## AgentFlow
 
-# Agentflow SDLC
+@AGENTS.md
 
-Before substantive coding, read `AGENTS.md`, `.agentflow/config.json`, and run `agentflow status`.
-Treat Agentflow as the authority for workflow progression. The coding harness owns reasoning and implementation; Agentflow owns the current stage, evidence requirements, review rules, and transition decisions.
-
-Do not bypass failed gates or fabricate evidence. Keep reviewer work read-only. After changing implementation, expect prior evidence to become stale.
+Use the `agentflow-sdlc` skill for AgentFlow-managed work.
 """
 
-CLAUDE = """# Claude Code + Agentflow\n\n@AGENTS.md\n\nUse the `agentflow-sdlc` skill for Agentflow-managed work.\n"""
+BLOCKS = (("AGENTS.md", AGENTS_BLOCK), ("CLAUDE.md", CLAUDE_BLOCK))
 
-
-def init_project(root: Path, config: ProjectConfig | None = None, force: bool = False) -> list[Path]:
-    root = root.resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    config = config or ProjectConfig()
-    af = root / ".agentflow"
-    if af.exists() and not force:
-        raise FileExistsError(".agentflow already exists; use --force to refresh generated integration files")
-    (af / "patterns").mkdir(parents=True, exist_ok=True)
-    (af / "evidence").mkdir(parents=True, exist_ok=True)
-    (af / "logs").mkdir(parents=True, exist_ok=True)
-    created = [save_config(root, config)]
-    (af / ".gitignore").write_text("state.json\nevidence/\nlogs/\n", encoding="utf-8")
-    created.append(af / ".gitignore")
-
-    agents = root / "AGENTS.md"
-    if not agents.exists() or force:
-        agents.write_text(AGENTS, encoding="utf-8")
-        created.append(agents)
-    claude = root / "CLAUDE.md"
-    if not claude.exists() or force:
-        claude.write_text(CLAUDE, encoding="utf-8")
-        created.append(claude)
-
-    # Generate compatibility skills rather than assuming every harness searches the same path.
-    for base in [root / ".agents" / "skills", root / ".claude" / "skills", root / ".codex" / "skills", root / ".pi" / "skills", root / ".opencode" / "skills"]:
-        skill_dir = base / "agentflow-sdlc"
-        skill_dir.mkdir(parents=True, exist_ok=True)
-        p = skill_dir / "SKILL.md"
-        p.write_text(SKILL, encoding="utf-8")
-        created.append(p)
-
-    # OpenCode gets an explicit read-only reviewer agent. Agentflow still checks worktree immutability.
-    oc_agent = root / ".opencode" / "agents" / "agentflow-reviewer.md"
-    oc_agent.parent.mkdir(parents=True, exist_ok=True)
-    oc_agent.write_text("""---
+OPENCODE_REVIEWER = """---
 description: Independent read-only Agentflow reviewer
 mode: primary
 permissions:
@@ -105,7 +84,76 @@ permissions:
     effect: allow
 ---
 Review only. Do not modify files. Follow AGENTS.md and the agentflow-sdlc skill.
-""", encoding="utf-8")
-    created.append(oc_agent)
+"""
 
-    return created
+
+class BootstrapError(RuntimeError):
+    """Initialization stopped; nothing in the repository was changed unless stated."""
+
+
+@dataclass
+class BootstrapResult:
+    provider_action: str
+    provider_state: str
+    written: list[Path] = field(default_factory=list)
+    blocks: list[dict[str, Any]] = field(default_factory=list)
+    skills: dict[str, Any] | None = None
+
+
+def _write_owned(path: Path, text: str) -> Path:
+    """Atomically replace a file AgentFlow owns outright."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(temp, path)
+    except BaseException:
+        Path(temp).unlink(missing_ok=True)
+        raise
+    return path
+
+
+def init_project(root: Path, config: ProjectConfig | None = None, force: bool = False, *,
+                 agentic: Agentic | None = None, install_provider: bool = True,
+                 replace_provider: bool = False) -> BootstrapResult:
+    root = root.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    config = config or ProjectConfig()
+    agentic = agentic or Agentic()
+    af = root / ".agentflow"
+    if af.exists() and not force:
+        raise FileExistsError(".agentflow already exists; use --force to refresh AgentFlow's own files and blocks")
+
+    # 1. Preflight, before any repository write: provider policy (may install/replace globally only when allowed).
+    try:
+        action, before = provider.ensure(agentic, install=install_provider, replace=replace_provider)
+    except provider.ProviderError as exc:
+        raise BootstrapError(f"{exc}. Nothing in the repository was changed.") from exc
+    # 2. Dry-run both shared-file blocks: a hand-edited block or an unwritable file stops init here.
+    for file, content in BLOCKS:
+        preview = agentic.put_block(root, file=file, owner=OWNER, block=BLOCK, content=content, dry_run=True)
+        if preview["exit_code"] != 0:
+            raise BootstrapError(f"{file}: {preview['status']}: {preview['reason']}. "
+                                 "Nothing in the repository was changed.")
+
+    result = BootstrapResult(provider_action=action, provider_state=before.state)
+    # 3. Files AgentFlow owns outright.
+    for name in ("patterns", "evidence", "logs"):
+        (af / name).mkdir(parents=True, exist_ok=True)
+    result.written.append(save_config(root, config))
+    result.written.append(_write_owned(af / ".gitignore", "state.json\nevidence/\nlogs/\n"))
+    result.written.append(_write_owned(root / ".opencode" / "agents" / "agentflow-reviewer.md", OPENCODE_REVIEWER))
+    # 4. Shared instruction files: one managed block each, through Agentic Dev.
+    for file, content in BLOCKS:
+        document = agentic.put_block(root, file=file, owner=OWNER, block=BLOCK, content=content)
+        result.blocks.append(document)
+        if document["exit_code"] != 0:
+            raise BootstrapError(f"{file}: {document['status']}: {document['reason']}")
+    # 5. The skill, placed and activated by Agentic Dev for every harness.
+    result.skills = agentic.activate_skills(root, [provider.SKILL_NAME], target="all", shared=True)
+    if result.skills["status"] != "ok":
+        skipped = [o["path"] for o in result.skills["outcomes"] if o["status"] == "skipped-unmanaged"]
+        raise BootstrapError(f"an unmanaged skill is in the way, left untouched: {', '.join(skipped)}")
+    return result

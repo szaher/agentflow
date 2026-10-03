@@ -17,12 +17,22 @@ class FakeAgentic:
     ``no-checks`` with ``missing_kinds`` and executes nothing.
     """
 
-    def __init__(self, kinds=("lint", "test"), status="passed", missing=(), unavailable=None):
+    def __init__(self, kinds=("lint", "test"), status="passed", missing=(), unavailable=None,
+                 bundled_digest="a" * 64, installed=None, block_status="created", skills_status="ok",
+                 tools=("claude", "codex")):
         self.kinds = set(kinds)
         self.status = status
         self.missing = list(missing)
         self.unavailable = unavailable
         self.calls: list[dict] = []
+        # Bootstrap state: the bundled provider digest, the global registry, and canned answers.
+        self.bundled_digest = bundled_digest
+        self.installed = list(installed or [])
+        self.block_status = block_status
+        self.skills_status = skills_status
+        self.tools = set(tools)
+        self.provider_adds: list[dict] = []
+        self.blocks: list[dict] = []
 
     def handshake(self):
         if self.unavailable:
@@ -44,6 +54,54 @@ class FakeAgentic:
         if missing:
             return verification_document("no-checks", kinds, commands, missing)
         return verification_document(self.status, kinds, commands, [])
+
+
+def _bootstrap_methods():
+    def inspect_provider(self, source):
+        self.handshake()
+        return {"name": "agentflow", "version": "0.1.0", "content_digest": self.bundled_digest, "source": str(source)}
+
+    def providers(self):
+        self.handshake()
+        return list(self.installed)
+
+    def add_provider(self, source, *, sha256):
+        self.handshake()
+        self.provider_adds.append({"source": str(source), "sha256": sha256})
+        self.installed = [p for p in self.installed if p["name"] != "agentflow"] + [installed_provider(sha256)]
+        return {"name": "agentflow", "content_digest": sha256}
+
+    def put_block(self, root, *, file, owner, block, content, dry_run=False):
+        self.handshake()
+        self.blocks.append({"file": file, "owner": owner, "block": block, "dry_run": dry_run})
+        ok = self.block_status in {"created", "appended", "replaced", "unchanged"}
+        return {"document_type": "agentic.instruction-block", "file": file, "block_id": f"{owner}.{block}",
+                "status": self.block_status, "exit_code": 0 if ok else 1, "dry_run": dry_run,
+                "reason": None if ok else "managed block agentflow.workflow was edited by hand"}
+
+    def activate_skills(self, root, names, *, target="all", shared=True):
+        self.handshake()
+        status = "skipped-unmanaged" if self.skills_status == "conflict" else "written"
+        return {"document_type": "agentic.skills-activation", "status": self.skills_status,
+                "exit_code": 0 if self.skills_status == "ok" else 1,
+                "outcomes": [{"skill": n, "harness": "claude", "path": f".claude/skills/{n}/SKILL.md", "status": status}
+                             for n in names]}
+
+    def doctor(self):
+        self.handshake()
+        return {"document_type": "agentic.doctor",
+                "tools": {name: {"available": name in self.tools, "path": None} for name in ("claude", "codex", "pi", "opencode")}}
+
+    return locals()
+
+
+for _name, _method in _bootstrap_methods().items():
+    setattr(FakeAgentic, _name, _method)
+
+
+def installed_provider(digest, verified=True):
+    return {"name": "agentflow", "version": "0.1.0", "content_digest": digest, "installed": True,
+            "verified": verified, "compatible": True, "source": "/somewhere"}
 
 
 def verification_document(status, kinds=(), commands=(), missing=()):
