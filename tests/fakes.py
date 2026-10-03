@@ -11,7 +11,11 @@ from agentflow.agentic import REQUIRED_FEATURES, AgenticUnavailable
 
 
 class FakeAgentic:
-    """Answers like the Agentic client would, recording every verify request."""
+    """Answers like the Agentic client would, recording every verify request.
+
+    Like Agentic Dev, a requested kind it has no command for makes the run
+    ``no-checks`` with ``missing_kinds`` and executes nothing.
+    """
 
     def __init__(self, kinds=("lint", "test"), status="passed", missing=(), unavailable=None):
         self.kinds = set(kinds)
@@ -36,7 +40,10 @@ class FakeAgentic:
         self.handshake()
         self.calls.append({"kinds": list(kinds), "commands": list(commands),
                            "include_changed": include_changed, "base": base})
-        return verification_document(self.status, kinds, commands, self.missing)
+        missing = self.missing or [kind for kind in kinds if kind not in self.kinds]
+        if missing:
+            return verification_document("no-checks", kinds, commands, missing)
+        return verification_document(self.status, kinds, commands, [])
 
 
 def verification_document(status, kinds=(), commands=(), missing=()):

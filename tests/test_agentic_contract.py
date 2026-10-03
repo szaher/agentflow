@@ -62,15 +62,17 @@ class AgenticContractTests(unittest.TestCase):
         document = self.agentic.handshake()
         jsonschema.validate(document, self.schema("contracts"))
 
-    def test_gate_runs_the_discovered_command_through_agentic(self):
+    def test_a_missing_required_kind_fails_and_executes_nothing(self):
+        # `fast` requires lint + test; the repo only has `make check` (test). Discovery must not weaken that.
         root = self.repo({"README.md": "# x\n", "app.py": "print(1)\n",
                           "Makefile": "check:\n\ttouch ran-make-check\n"})
-        self.assertEqual(self.agentic.discovered_kinds(root), {"test"})
         gate = run_gates(root, ProjectConfig(), "fast", agentic=self.agentic)
         jsonschema.validate(gate.verification, self.schema("verification-run"))
-        self.assertEqual((gate.status, gate.plan.kinds), ("passed", ["test"]))
-        self.assertEqual([(r["kind"], r["command"]) for r in gate.results], [("test", "make check")])
-        self.assertTrue((root / "ran-make-check").exists())
+        self.assertEqual(gate.plan.kinds, ["lint", "test"])
+        self.assertEqual((gate.status, gate.passed), ("no-checks", False))
+        self.assertEqual((gate.verification["missing_kinds"], gate.verification["checks_executed"], gate.results),
+                         (["lint"], 0, []))
+        self.assertFalse((root / "ran-make-check").exists())
 
     def test_explicit_gate_failure_and_change_aware_augmentation(self):
         root = self.repo({"README.md": "# x\n", "Makefile": "test:\n\ttrue\nlint:\n\ttrue\n", "app.py": "x = 1\n"})
@@ -87,20 +89,24 @@ class AgenticContractTests(unittest.TestCase):
         self.assertEqual(augmented.verification["requested_kinds"], ["test", "lint"])
 
     @unittest.skipUnless(shutil.which("npm") or REQUIRED, "needs npm")
-    def test_every_command_of_a_required_kind_runs(self):
+    def test_every_command_of_each_required_kind_runs_once_all_kinds_exist(self):
         root = self.repo({"README.md": "# x\n", "app.py": "x = 1\n",
-                          "Makefile": "test:\n\ttouch ran-make\n",
+                          "Makefile": "test:\n\ttouch ran-make-test\nlint:\n\ttouch ran-make-lint\n",
                           "package.json": json.dumps({"scripts": {"test": "node -e \"require('fs').writeFileSync('ran-npm','')\""}})})
         gate = run_gates(root, ProjectConfig(), "fast", agentic=self.agentic)
         jsonschema.validate(gate.verification, self.schema("verification-run"))
-        self.assertEqual(gate.status, "passed")
-        self.assertEqual([r["command"] for r in gate.results], ["make test", "npm run test"])
-        self.assertTrue((root / "ran-make").exists() and (root / "ran-npm").exists())
+        self.assertEqual((gate.status, gate.verification["missing_kinds"]), ("passed", []))
+        self.assertEqual([(r["kind"], r["command"]) for r in gate.results],
+                         [("test", "make test"), ("test", "npm run test"), ("lint", "make lint")])
+        for marker in ("ran-make-test", "ran-npm", "ran-make-lint"):
+            self.assertTrue((root / marker).exists(), marker)
 
     def test_no_discovered_commands_never_passes(self):
         root = self.repo({"README.md": "# docs only\n"})
         gate = run_gates(root, ProjectConfig(), "standard", agentic=self.agentic)
+        jsonschema.validate(gate.verification, self.schema("verification-run"))
         self.assertEqual((gate.status, gate.passed), ("no-checks", False))
+        self.assertEqual(gate.verification["missing_kinds"], ["test", "lint", "typecheck"])
 
 
 if __name__ == "__main__":

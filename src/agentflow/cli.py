@@ -56,13 +56,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     pattern = load_pattern(project.config.pattern, project.root)
     print(f"✓ pattern valid: {pattern.name} ({len(pattern.stages)} stages)")
     try:
-        gp = plan_gate(project.root, project.config, project.config.gate_profile, agentic=Agentic())
+        agentic = Agentic()
+        gp = plan_gate(project.root, project.config, project.config.gate_profile, agentic=agentic)
+        discovered = agentic.discovered_kinds(project.root) if gp.kinds else set()
     except AgenticError as exc:
         print(f"✗ agentic-dev: {exc}"); return 2
-    if gp.kinds or gp.commands:
-        print(f"✓ gates ({gp.profile}) via agentic-dev: " + ", ".join(gp.kinds or gp.commands))
-    else:
-        print("! no deterministic gates discovered; configure .agentflow/config.json -> gates")
+    if gp.commands:
+        print(f"✓ gates ({gp.profile}) via agentic-dev, explicit: " + "; ".join(gp.commands))
+    for kind in gp.kinds:
+        # Informational only: the requirement stands, and the gate fails if a kind has no command.
+        mark = "✓" if kind in discovered else "✗"
+        note = "" if kind in discovered else " — no command discovered; this gate will fail (no-checks)"
+        print(f"{mark} gate ({gp.profile}) requires {kind}{note}")
     return 0 if statuses.get(project.config.executor, False) else 2
 
 

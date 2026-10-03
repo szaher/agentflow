@@ -183,7 +183,7 @@ Agentflow intentionally uses a coarse adapter boundary. It does not reimplement 
 
 AgentFlow decides **what a gate requires**; [Agentic Dev](https://github.com/szaher/agentic-dev) **discovers and runs the commands**. The `agentic` CLI is a hard prerequisite: AgentFlow talks to it only through process + JSON contracts, checks `agentic contracts --json` for the contracts and features it needs (never the version), and has no fallback of its own. If `agentic` is missing or incompatible, `agentflow doctor` and `agentflow verify` say so and a gate stage **blocks** the run instead of retrying the implementation. Set `AGENTFLOW_AGENTIC` to use a specific binary.
 
-A gate is full-project verification of the profile's command kinds, running **every** command Agentic Dev discovers for each:
+A gate is full-project verification. Each profile names the command kinds it **requires**, and Agentic Dev runs **every** command it discovers for each:
 
 | Profile | Kinds |
 |---|---|
@@ -191,9 +191,9 @@ A gate is full-project verification of the profile's command kinds, running **ev
 | `standard` | lint, typecheck, test |
 | `strict` | build, lint, typecheck, test |
 
-Profiles are defined in terms of *kinds*, not tools: AgentFlow requests the profile's kinds that Agentic Dev actually discovered, and Agentic Dev decides which concrete commands implement them (for example `make check`, `uv run pytest`, `pnpm test`). If none of the profile's kinds is discovered, the gate fails closed.
+Profiles are defined in terms of *kinds*, not tools. AgentFlow decides which kinds are required and always requests all of them; Agentic Dev decides whether each can be satisfied and which concrete commands implement it (for example `make check`, `uv run pytest`, `pnpm test`). If **any** required kind has no command, Agentic Dev reports `no-checks` with the `missing_kinds` and runs nothing, and the gate fails: for example, `fast` fails on a repository with tests but no lint command. `agentflow doctor` lists the required kinds and which ones have no command yet.
 
-You can override each profile in `.agentflow/config.json`; explicit commands replace discovery for that profile and still execute through Agentic Dev:
+You can override each profile in `.agentflow/config.json`; explicit commands replace the profile's kinds and still execute through Agentic Dev. AgentFlow passes each command intact as a single argument and never invokes a shell itself; Agentic Dev's execution backend runs it:
 
 ```json
 {

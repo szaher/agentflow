@@ -104,6 +104,8 @@ class Agentic:
             raise AgenticUnavailable(f"unsupported `agentic contracts` document; {INSTALL_HINT}")
         try:
             self._validated("contracts", document)
+        except AgenticUnavailable:
+            raise  # already explains itself (for example jsonschema missing)
         except AgenticError as exc:
             raise AgenticUnavailable(f"{exc}; {INSTALL_HINT}") from exc
         offered = document.get("contracts") or {}

@@ -91,7 +91,7 @@ class EngineTests(unittest.TestCase):
         self.assertFalse(any(e["kind"]=="gates" for e in state.evidence))
 
     def test_no_checks_gate_fails_closed(self):
-        root,status,state=self.run_fast(FakeAgentic(status="no-checks",missing=["test"]))
+        root,status,state=self.run_fast(FakeAgentic(kinds={"test"}))
         gates=[e for e in state.evidence if e["kind"]=="gates"]
         self.assertTrue(gates)
         self.assertTrue(all(not e["passed"] and e["status"]=="no-checks" for e in gates))
@@ -105,10 +105,10 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(state.history[0]["run_start_commit"],head)
 
     def test_gate_evidence_wraps_the_whole_verification_document(self):
-        root,status,state=self.run_fast(FakeAgentic(kinds={"test"}))
+        root,status,state=self.run_fast(FakeAgentic())
         gate=next(e for e in state.evidence if e["kind"]=="gates")
         evidence=json.loads((root/gate["path"]).read_text())
-        self.assertEqual(evidence["verification"],verification_document("passed",["test"]))
+        self.assertEqual(evidence["verification"],verification_document("passed",["lint","test"]))
         self.assertEqual((evidence["profile"],evidence["passed"],evidence["status"]),("fast",True,"passed"))
 
     def test_workflow_gates_are_full_only(self):

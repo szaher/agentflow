@@ -25,11 +25,21 @@ class GateTests(unittest.TestCase):
         self.assertEqual(PROFILE_KINDS, {"fast": ("lint", "test"), "standard": ("lint", "typecheck", "test"),
                                          "strict": ("build", "lint", "typecheck", "test")})
 
-    def test_profile_kinds_are_intersected_with_discovered_kinds(self):
-        fake = FakeAgentic(kinds={"test", "build", "install"})
-        run_gates(self.root, ProjectConfig(), "standard", agentic=fake)
-        run_gates(self.root, ProjectConfig(), "strict", agentic=fake)
-        self.assertEqual([c["kinds"] for c in fake.calls], [["test"], ["build", "test"]])
+    def test_every_profile_kind_is_required_unchanged(self):
+        fake = FakeAgentic(kinds={"lint", "typecheck", "test", "build"})
+        for profile in ("fast", "standard", "strict"):
+            run_gates(self.root, ProjectConfig(), profile, agentic=fake)
+        self.assertEqual([c["kinds"] for c in fake.calls],
+                         [["lint", "test"], ["lint", "typecheck", "test"], ["build", "lint", "typecheck", "test"]])
+
+    def test_discovery_never_weakens_the_requirement(self):
+        # Only `test` exists: `fast` still requires lint, Agentic Dev reports it missing, the gate fails.
+        fake = FakeAgentic(kinds={"test"})
+        gate = run_gates(self.root, ProjectConfig(), "fast", agentic=fake)
+        self.assertEqual(fake.calls[0]["kinds"], ["lint", "test"])
+        self.assertEqual((gate.status, gate.passed, gate.results), ("no-checks", False, []))
+        self.assertEqual(gate.verification["missing_kinds"], ["lint"])
+        self.assertIn("required kind(s): lint", gate.reason)
 
     def test_custom_gates_travel_through_agentic_as_commands(self):
         fake = FakeAgentic(kinds=set())
@@ -38,10 +48,11 @@ class GateTests(unittest.TestCase):
                                        "include_changed": False, "base": None}])
         self.assertEqual([r["command"] for r in gate.results], ["make e2e", "make smoke"])
 
-    def test_nothing_to_run_fails_closed_without_calling_verify(self):
-        fake = FakeAgentic(kinds={"format", "install"})
-        gate = run_gates(self.root, ProjectConfig(), "fast", agentic=fake)
-        self.assertEqual((gate.status, gate.passed, gate.verification, fake.calls), ("no-checks", False, None, []))
+    def test_empty_custom_gates_fall_back_to_the_profile_requirement(self):
+        fake = FakeAgentic()
+        run_gates(self.root, ProjectConfig(gates={"fast": []}), "fast", agentic=fake)
+        self.assertEqual(fake.calls[0], {"kinds": ["lint", "test"], "commands": [], "include_changed": False,
+                                         "base": None})
 
     def test_status_is_authoritative(self):
         for status, missing in (("no-checks", ["test"]), ("failed", [])):
@@ -107,6 +118,24 @@ class ClientTests(unittest.TestCase):
         with self.assertRaisesRegex(AgenticUnavailable, "verification-run@1"):
             Agentic(fake_cli(Path(tempfile.mkdtemp()), contracts=old)).handshake()
 
+    def test_missing_jsonschema_is_reported_as_itself(self):
+        import builtins
+        real_import = builtins.__import__
+
+        def no_jsonschema(name, *args, **kwargs):
+            if name == "jsonschema":
+                raise ImportError(name)
+            return real_import(name, *args, **kwargs)
+
+        builtins.__import__ = no_jsonschema
+        try:
+            with self.assertRaises(AgenticUnavailable) as caught:
+                Agentic(fake_cli(self.dir)).handshake()
+        finally:
+            builtins.__import__ = real_import
+        self.assertIn("jsonschema is required", str(caught.exception))
+        self.assertNotIn("install Agentic Dev", str(caught.exception))
+
     def test_never_reads_the_version(self):
         Agentic(fake_cli(self.dir)).handshake()
         self.assertFalse(any("--version" in call for call in logged_calls(self.dir)))
@@ -127,7 +156,7 @@ class ClientTests(unittest.TestCase):
             Agentic(fake_cli(Path(tempfile.mkdtemp()), verify=failed, verify_exit=0)).verify(
                 self.dir, kinds=["test"], commands=[])
 
-    def test_argv_not_shell(self):
+    def test_custom_command_is_passed_as_single_agentic_argument(self):
         Agentic(fake_cli(self.dir)).verify(self.dir, kinds=["test"], commands=["echo a; rm -rf /"],
                                            include_changed=True, base="abc")
         call = next(c for c in logged_calls(self.dir) if c[:2] == ["verify", "run"])
