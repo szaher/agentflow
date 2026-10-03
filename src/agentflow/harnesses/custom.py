@@ -33,5 +33,6 @@ class CommandHarness(Harness):
         if not inserted: out.append(prompt)
         return out
 
-    def execute(self, root: Path, prompt: str, *, read_only: bool=False, extra: dict|None=None) -> HarnessResult:
-        return execute_command(self.name,self.command_preview(prompt,read_only=read_only,extra=extra),root,read_only)
+    def execute(self, root: Path, prompt: str, *, read_only: bool=False, extra: dict|None=None,
+                env: dict[str, str]|None=None) -> HarnessResult:
+        return execute_command(self.name,self.command_preview(prompt,read_only=read_only,extra=extra),root,read_only,env)

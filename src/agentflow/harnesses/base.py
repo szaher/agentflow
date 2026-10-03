@@ -10,7 +10,9 @@ class Harness(ABC):
     executable: str
 
     @abstractmethod
-    def execute(self, root: Path, prompt: str, *, read_only: bool = False, extra: dict | None = None) -> HarnessResult:
+    def execute(self, root: Path, prompt: str, *, read_only: bool = False, extra: dict | None = None,
+                env: dict[str, str] | None = None) -> HarnessResult:
+        """Run in ``root`` (the run's workspace). ``env`` adds variables such as AGENTFLOW_ROOT."""
         raise NotImplementedError
 
     @abstractmethod

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .models import Pattern
+from .requirements import requirements
 
 
 def validate_pattern(pattern: Pattern) -> None:
@@ -21,6 +22,7 @@ def validate_pattern(pattern: Pattern) -> None:
             raise ValueError(f"Unknown on_success {s.on_success!r} from {s.id}")
         if s.on_failure not in known:
             raise ValueError(f"Unknown on_failure {s.on_failure!r} from {s.id}")
+    requirements(pattern)  # raises on malformed requirements
 
 
 def _load(path: Path) -> Pattern:

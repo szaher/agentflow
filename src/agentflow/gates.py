@@ -12,6 +12,8 @@ knowledge of its own:
   and still execute through Agentic Dev: each is passed intact as one
   ``--command`` argument (AgentFlow never invokes a shell itself; Agentic Dev's
   execution backend runs it);
+- a pattern's ``verification.minimum`` kinds are required by every gate of that
+  pattern: added to the profile's kinds, and required alongside custom commands;
 - a gate with nothing to run fails closed; only an explicit ``passed`` passes;
 - change-aware checks (``include_changed``) can only add to the full baseline,
   using the run-start commit as the base. Workflow gate stages are full-only.
@@ -21,7 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from .agentic import Agentic
 from .models import ProjectConfig
@@ -64,20 +66,23 @@ class GateRun:
 
 
 def plan_gate(root: Path, config: ProjectConfig, profile: str, *, agentic: Agentic,
-              include_changed: bool = False, base: str | None = None) -> GatePlan:
+              include_changed: bool = False, base: str | None = None, minimum: Sequence[str] = ()) -> GatePlan:
     if profile not in PROFILE_KINDS:
         raise ValueError(f"unknown gate profile {profile!r}; choose one of: {', '.join(PROFILE_KINDS)}")
     custom = config.gates.get(profile)
     if custom:
-        return GatePlan(profile, [], list(custom), include_changed, base)
+        # Custom commands replace the profile's kinds, never the pattern's minimum.
+        return GatePlan(profile, list(dict.fromkeys(minimum)), list(custom), include_changed, base)
     # The requirement is AgentFlow's; whether it can be met is Agentic Dev's answer.
-    return GatePlan(profile, list(PROFILE_KINDS[profile]), [], include_changed, base)
+    kinds = list(dict.fromkeys([*PROFILE_KINDS[profile], *minimum]))
+    return GatePlan(profile, kinds, [], include_changed, base)
 
 
 def run_gates(root: Path, config: ProjectConfig, profile: str, *, agentic: Agentic | None = None,
-              include_changed: bool = False, base: str | None = None) -> GateRun:
+              include_changed: bool = False, base: str | None = None, minimum: Sequence[str] = ()) -> GateRun:
     agentic = agentic or Agentic()
-    plan = plan_gate(root, config, profile, agentic=agentic, include_changed=include_changed, base=base)
+    plan = plan_gate(root, config, profile, agentic=agentic, include_changed=include_changed, base=base,
+                     minimum=minimum)
     document = agentic.verify(root, kinds=plan.kinds, commands=plan.commands,
                               include_changed=plan.include_changed, base=plan.base)
     status = document["status"]  # authoritative

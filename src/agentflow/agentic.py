@@ -41,6 +41,14 @@ BOOTSTRAP_CONTRACTS = {"contracts": "1", "provider-source": "1", "providers": "1
 BOOTSTRAP_FEATURES = ("instructions.managed-block", "providers.inspect", "providers.install-pinned",
                       "skills.activation-dry-run", "skills.activation-report")
 DOCTOR_CONTRACTS = {"contracts": "1", "doctor": "1"}
+# Pattern requirements (v0.16 slice 4): each operation checks only what it uses.
+READINESS_CONTRACTS = {"contracts": "1", "readiness-verification": "1"}
+READINESS_FEATURES = ("readiness.scope-ci",)  # introduced `--scope local|ci`
+CAPABILITY_CONTRACTS = {"contracts": "1", "capability-status": "1"}
+WORKTREE_CONTRACTS = {"contracts": "1", "worktree": "1", "worktree-status": "1", "worktree-clean": "1"}
+WORKTREE_FEATURES = ("worktree.lifecycle",)
+METRICS_CONTRACTS = {"contracts": "1", "metric-record": "1"}
+METRICS_FEATURES = ("metrics.record-report",)
 VERIFY_STATUSES = ("passed", "failed", "no-checks")
 
 
@@ -232,3 +240,75 @@ class Agentic:
         self.handshake(DOCTOR_CONTRACTS, ())
         _, document = self._call(["doctor", "--json"])
         return self._validated("doctor", document)
+
+    # -- pattern requirements: readiness, capabilities, worktrees, metrics ---------------------
+
+    def readiness(self, workspace: Path, target: str) -> dict[str, Any]:
+        """Verify ``target`` with local scope in ``workspace`` (readiness-verification v1). Never remediates.
+
+        Exit 1 (target not met) is a result; exit 2 (unknown level, spec error) raises.
+        """
+
+        self.handshake(READINESS_CONTRACTS, READINESS_FEATURES)
+        code, document = self._call(["ready", "verify", str(workspace), "--target", target, "--scope", "local",
+                                     "--json"], cwd=workspace, ok=(0, 1))
+        self._validated("readiness-verification", document)
+        if code != document["exit_code"] or document["passed"] is not (code == 0):
+            raise AgenticError(f"`agentic ready verify` passed={document['passed']} disagrees with exit {code}")
+        if document["scope"] != "local":
+            raise AgenticError(f"`agentic ready verify` answered scope {document['scope']!r}, asked local")
+        return document
+
+    def capabilities(self) -> dict[str, Any]:
+        """Optional capability state by name (capability-status v1)."""
+
+        self.handshake(CAPABILITY_CONTRACTS, ())
+        _, document = self._call(["capabilities", "status", "--json"])
+        return self._validated("capability-status", document)
+
+    def create_worktree(self, root: Path, *, name: str, branch: str, base: str, agent: str | None = None,
+                        task: str | None = None) -> dict[str, Any]:
+        """Create one isolated worktree (worktree v1). Exit 2 means nothing was created."""
+
+        self.handshake(WORKTREE_CONTRACTS, WORKTREE_FEATURES)
+        args = ["worktree", "create", name, "--path", str(root), "--branch", branch, "--base", base, "--json"]
+        if agent:
+            args += ["--agent", agent]
+        if task:
+            args += ["--task", task]
+        _, document = self._call(args, cwd=root)
+        return self._validated("worktree", document)
+
+    def worktree_status(self, root: Path, name: str) -> dict[str, Any]:
+        """One worktree's state (worktree-status v1). An unknown name exits 2 and raises AgenticError."""
+
+        self.handshake(WORKTREE_CONTRACTS, WORKTREE_FEATURES)
+        _, document = self._call(["worktree", "status", name, "--path", str(root), "--json"], cwd=root)
+        self._validated("worktree-status", document)
+        if not (isinstance(document.get("worktree"), str) and isinstance(document.get("branch"), str)):
+            raise AgenticError(f"`agentic worktree status {name}` did not report a worktree path and branch")
+        return document
+
+    def clean_worktree(self, root: Path, name: str) -> dict[str, Any]:
+        """Remove a worktree the normal way (worktree-clean v1): never ``--force``, never deletes the branch.
+
+        A worktree with uncommitted changes is refused (exit 2, raised as AgenticError) and kept.
+        """
+
+        self.handshake(WORKTREE_CONTRACTS, WORKTREE_FEATURES)
+        _, document = self._call(["worktree", "clean", name, "--path", str(root), "--json"], cwd=root)
+        return self._validated("worktree-clean", document)
+
+    def record_metric(self, event: str, fields: dict[str, Any], *, repository: Path,
+                      session_id: str | None = None) -> dict[str, Any]:
+        """Submit a local metric event (metric-record v1). Agentic Dev drops it unless metrics are enabled."""
+
+        self.handshake(METRICS_CONTRACTS, METRICS_FEATURES)
+        args = ["metrics", "record", event, "--path", str(repository), "--json"]
+        for key, value in fields.items():
+            args += ["--field", f"{key}={value}"]
+        if session_id:
+            args += ["--session-id", session_id]
+        _, document = self._call(args, cwd=repository)
+        return self._validated("metric-record", document)
+

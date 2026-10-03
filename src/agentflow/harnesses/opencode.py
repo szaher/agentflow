@@ -17,7 +17,9 @@ class OpenCodeHarness(Harness):
         cmd.append(prompt)
         return cmd
 
-    def execute(self, root: Path, prompt: str, *, read_only: bool = False, extra: dict | None = None) -> HarnessResult:
+    def execute(self, root: Path, prompt: str, *, read_only: bool = False, extra: dict | None = None,
+                env: dict[str, str] | None = None) -> HarnessResult:
         # Read-only is always verified after execution by Agentflow. Projects can
         # additionally configure a read-only OpenCode agent via review_agent.
-        return execute_command(self.name, self.command_preview(prompt, read_only=read_only, extra=extra), root, read_only)
+        return execute_command(self.name, self.command_preview(prompt, read_only=read_only, extra=extra), root, read_only,
+                               env)

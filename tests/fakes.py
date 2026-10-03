@@ -19,7 +19,8 @@ class FakeAgentic:
 
     def __init__(self, kinds=("lint", "test"), status="passed", missing=(), unavailable=None,
                  bundled_digest="a" * 64, installed=None, block_status="created", skills_status="ok",
-                 tools=("claude", "codex")):
+                 tools=("claude", "codex"), readiness_passed=True, capability_state=None, worktree_root=None,
+                 clean_error=None, metrics_error=None):
         self.kinds = set(kinds)
         self.status = status
         self.missing = list(missing)
@@ -34,6 +35,15 @@ class FakeAgentic:
         self.provider_adds: list[dict] = []
         self.blocks: list[dict] = []
         self.skill_calls: list[dict] = []
+        # Pattern requirements: canned answers, and every call in order.
+        self.readiness_passed = readiness_passed
+        self.capability_state = dict(capability_state or {})
+        self.worktree_root = worktree_root
+        self.clean_error = clean_error
+        self.metrics_error = metrics_error
+        self.requirement_calls: list[tuple] = []
+        self.worktrees: dict[str, dict] = {}
+        self.metrics: list[dict] = []
 
     def handshake(self):
         if self.unavailable:
@@ -97,8 +107,63 @@ def _bootstrap_methods():
     return locals()
 
 
-for _name, _method in _bootstrap_methods().items():
-    setattr(FakeAgentic, _name, _method)
+def _requirement_methods():
+    import subprocess
+
+    from agentflow.agentic import AgenticError
+
+    def readiness(self, workspace, target):
+        self.handshake()
+        self.requirement_calls.append(("readiness", str(workspace), target))
+        passed = self.readiness_passed
+        return {"document_type": "agentic.readiness-verification", "target": target, "scope": "local",
+                "passed": passed, "exit_code": 0 if passed else 1,
+                "maturity": {"current": target if passed else "unaware", "target": target, "target_met": passed},
+                "blockers": [] if passed else [{"id": "context.readme.setup", "title": "README explains setup"}]}
+
+    def capabilities(self):
+        self.handshake()
+        self.requirement_calls.append(("capabilities",))
+        return {name: {"enabled": enabled, "provider": "x"} for name, enabled in self.capability_state.items()}
+
+    def create_worktree(self, root, *, name, branch, base, agent=None, task=None):
+        self.handshake()
+        self.requirement_calls.append(("worktree-create", name, branch, base))
+        path = Path(self.worktree_root or Path(root).parent / "worktrees") / name
+        done = subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", branch, str(path), base],
+                              capture_output=True, text=True, check=False)
+        if done.returncode:  # like agentic: exit 2, nothing created
+            raise AgenticError(f"`agentic worktree create` exited 2: {done.stderr.strip()}")
+        self.worktrees[name] = {"document_type": "agentic.worktree-status", "worktree": str(path), "branch": branch}
+        return {"document_type": "agentic.worktree", "worktree": str(path), "branch": branch}
+
+    def worktree_status(self, root, name):
+        self.handshake()
+        self.requirement_calls.append(("worktree-status", name))
+        if name not in self.worktrees:
+            raise AgenticError(f"`agentic worktree status` exited 2: unknown worktree: {name}")
+        return dict(self.worktrees[name])
+
+    def clean_worktree(self, root, name):
+        self.handshake()
+        self.requirement_calls.append(("worktree-clean", name))
+        if self.clean_error:
+            raise AgenticError(self.clean_error)
+        return {"document_type": "agentic.worktree-clean", "worktree": name}
+
+    def record_metric(self, event, fields, *, repository, session_id=None):
+        self.handshake()
+        if self.metrics_error:
+            raise AgenticError(self.metrics_error)
+        self.metrics.append({"event": event, "session_id": session_id, **fields})
+        return {"document_type": "agentic.metric-record", "recorded": True}
+
+    return locals()
+
+
+for _name, _method in {**_bootstrap_methods(), **_requirement_methods()}.items():
+    if not _name.startswith("_") and callable(_method) and _name not in {"subprocess", "AgenticError"}:
+        setattr(FakeAgentic, _name, _method)
 
 
 def installed_provider(digest, verified=True):
