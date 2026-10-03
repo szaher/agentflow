@@ -35,5 +35,14 @@ def save_state(root: Path, state: RunState) -> None:
     atomic_json(root / STATE_FILE, state.to_dict())
 
 
+def workspace(root: Path, state: RunState) -> Path:
+    """Where the run's work happens: its worktree when isolated, otherwise the repository root.
+
+    State and evidence always stay in the repository root's ``.agentflow``.
+    """
+
+    return Path(state.worktree["path"]) if state.worktree else root
+
+
 def record(state: RunState, event: str, **fields: object) -> None:
     state.history.append({"at": now_iso(), "event": event, **fields})

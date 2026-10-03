@@ -18,7 +18,8 @@ from .git import head_commit, implementation_fingerprint
 from .harnesses import detected as detect_harnesses, names as harness_names
 from .models import ProjectConfig
 from .patterns import list_patterns, load_pattern
-from .state import load_state, new_state, record, save_state
+from .requirements import requirements
+from .state import load_state, new_state, record, save_state, workspace
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -145,14 +146,26 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"Run {state.run_id}: pattern={state.pattern}, executor={state.executor}, reviewers={','.join(state.reviewers) or '(executor)'}")
     if args.dry_run:
         print(f"Entry stage: {state.stage}")
+        for line in engine.requirements.describe(): print(f"Requires {line}")
         return 0
     try:
-        status = engine.run(max_steps=args.max_steps)
+        status = engine.start()
+        if status == "running":
+            status = engine.run(max_steps=args.max_steps)
     except (EngineError, FileNotFoundError, KeyError) as exc:
         print(f"agentflow: {exc}", file=sys.stderr); return 2
+    _print_worktree(engine.state)
     print(f"Status: {status}")
+    if status == "blocked": print(f"Reason: {engine.state.awaiting_reason}")
     if status == "awaiting_approval": print(f"Reason: {engine.state.awaiting_reason}\nApprove with: agentflow approve")
     return 0 if status in {"complete", "awaiting_approval"} else 2
+
+
+def _print_worktree(state) -> None:
+    tree = state.worktree
+    if tree:
+        where = "removed (clean, on success)" if tree.get("cleaned") else tree["path"]
+        print(f"Worktree: {where} | branch {tree['branch']} from {tree['base'][:12]}")
 
 
 def cmd_step(args: argparse.Namespace) -> int:
@@ -164,9 +177,13 @@ def cmd_step(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     project = load_project(); state = load_state(project.root)
-    current = implementation_fingerprint(project.root)
+    work = workspace(project.root, state)
+    current = implementation_fingerprint(work) if work.is_dir() else None
     print(f"run:       {state.run_id}\nstatus:    {state.status}\npattern:   {state.pattern}\nstage:     {state.stage}\nexecutor:  {state.executor}\nreviewers: {', '.join(state.reviewers)}")
     print(f"evidence:  {len(state.evidence)} records")
+    if state.worktree:
+        tree = state.worktree
+        print(f"worktree:  {'removed' if tree.get('cleaned') else tree['path']} (branch {tree['branch']})")
     if state.fingerprint: print(f"fresh:     {'yes' if state.fingerprint == current else 'NO — repository changed since verification'}")
     if state.awaiting_reason: print(f"reason:    {state.awaiting_reason}")
     return 0
@@ -175,8 +192,10 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_verify(args: argparse.Namespace) -> int:
     project = load_project(); state = load_state(project.root)
     profile = args.profile or project.config.gate_profile
+    minimum = requirements(load_pattern(state.pattern, project.root)).minimum
     try:
-        gate = run_gates(project.root, project.config, profile, include_changed=args.include_changed,
+        gate = run_gates(workspace(project.root, state), project.config, profile, minimum=minimum,
+                         include_changed=args.include_changed,
                          base=state.run_start_commit if args.include_changed else None)
     except (AgenticError, ValueError) as exc:
         print(f"agentflow: {exc}", file=sys.stderr); return 2
@@ -206,6 +225,7 @@ def cmd_explain(args: argparse.Namespace) -> int:
     project = load_project(); name = args.pattern or project.config.pattern
     p = load_pattern(name, project.root)
     print(f"{p.name}: {p.description}\n")
+    for line in requirements(p).describe(): print(f"requires  {line}")
     for s in p.stages:
         print(f"- {s.id:20} {s.kind:7} -> pass:{s.on_success or 'done'} fail:{s.on_failure or '-'} | {s.title}")
     return 0

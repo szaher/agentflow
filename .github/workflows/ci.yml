@@ -16,8 +16,8 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -e . 'jsonschema>=4.23'
-      # Agentic Dev contracts AgentFlow consumes (v0.16 slice 3: szaher/agentic-dev#70). Pinned until a release is on PyPI.
-      - run: python -m pip install 'agentic-dev @ git+https://github.com/szaher/agentic-dev@2fed49af71433ec0177caa5ec5e6f733d298b030'
+      # Agentic Dev contracts AgentFlow consumes (v0.16 slice 4: szaher/agentic-dev#71). Pinned until a release is on PyPI.
+      - run: python -m pip install 'agentic-dev @ git+https://github.com/szaher/agentic-dev@945a75c6f90b2b47926cf9cf752ba6e23703ba48'
       - run: python -m unittest discover -s tests -v
         env:
           AGENTFLOW_REQUIRE_AGENTIC: "1"

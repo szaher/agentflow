@@ -34,6 +34,10 @@ class Pattern:
     stages: list[Stage]
     tags: list[str] = field(default_factory=list)
     defaults: dict[str, Any] = field(default_factory=dict)
+    # Pattern requirements (v0.16 slice 4); all optional and off by default. See requirements.py.
+    requires: dict[str, Any] = field(default_factory=dict)
+    verification: dict[str, Any] = field(default_factory=dict)
+    isolation: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Pattern":
@@ -80,6 +84,8 @@ class RunState:
     reviewers: list[str] = field(default_factory=list)
     fingerprint: str | None = None
     run_start_commit: str | None = None
+    # The run's isolated worktree, when its pattern asks for one: name, path, branch, base, cleaned.
+    worktree: dict[str, Any] | None = None
     plan_hash: str | None = None
     awaiting_reason: str | None = None
     history: list[dict[str, Any]] = field(default_factory=list)

@@ -26,6 +26,15 @@ def write_gate_evidence(root: Path, state: RunState, gate: GateRun, fingerprint:
     return path
 
 
+def write_precondition_evidence(root: Path, state: RunState, name: str, document: dict) -> Path:
+    """AgentFlow's envelope around an Agentic Dev precondition document (readiness, capabilities)."""
+
+    data = {"run_id": state.run_id, "at": now_iso(), "precondition": name, "document": document}
+    path = root / ".agentflow" / "evidence" / state.run_id / f"preconditions-{name}.json"
+    atomic_json(path, data)
+    return path
+
+
 def write_review_evidence(root: Path, state: RunState, harness: str, index: int, stdout: str, stderr: str, fingerprint: str, passed: bool) -> Path:
     data = {"run_id": state.run_id, "stage": state.stage, "at": now_iso(), "harness": harness,
             "fingerprint": fingerprint, "passed": passed, "stdout": stdout, "stderr": stderr}

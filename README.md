@@ -315,6 +315,30 @@ Example:
 
 Supported stage kinds are `agent`, `gate`, `review`, `human`, and `noop`.
 
+### Pattern requirements
+
+A pattern can also declare what must hold before a run starts and how the run is isolated. Every field is optional and off by default; the built-in patterns declare none.
+
+```json
+{
+  "requires": {"readiness": "foundational", "capabilities": ["sast"]},
+  "verification": {"minimum": ["test"]},
+  "isolation": {"mode": "worktree", "cleanup": "on-success"}
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `requires.readiness` | The repository must meet this Agent Ready level: `agentic ready verify --scope local` in the run's workspace. If not, the run is **blocked** with the blockers listed and the assessment kept as evidence. AgentFlow never remediates (never runs `agentic ready make`). |
+| `requires.capabilities` | Each named capability must exist and be enabled (`agentic capabilities status`). AgentFlow never enables one for you. |
+| `verification.minimum` | Kinds every gate of this pattern requires, added to the profile's kinds. They also apply when `.agentflow/config.json` replaces a profile with custom commands. |
+| `isolation.mode: worktree` | One Agentic Dev worktree per run (`agentflow-<run id>`, branch `agentflow/<run id>`), created from the run-start commit. Agents, reviews, gates and the risk check all run there; your checkout is untouched, and `.agentflow/` state and evidence stay in it. Uncommitted changes in your checkout are not carried into the worktree. |
+| `isolation.cleanup: on-success` | When a run completes, ask Agentic Dev for a normal clean. A worktree with uncommitted work is refused and kept. Worktrees are never force-removed, and failed or blocked runs always keep theirs (`agentic worktree clean agentflow-<run id>` when you are done). |
+
+The order at run start is fixed: the worktree first (if isolated), then readiness and capabilities in that workspace, then the first stage. Unknown keys in these sections are a validation error, not ignored. Level, capability and kind names belong to Agentic Dev, which rejects unknown ones.
+
+When local metrics are enabled in Agentic Dev (`agentic metrics enable`; off by default), each executed stage records one `agentflow.stage` event (stage, kind, outcome, pattern, attempt, duration) through `agentic metrics record`. A metrics problem never changes a run's outcome.
+
 ## Commands
 
 ```text
@@ -355,6 +379,7 @@ This gives one architecture with two UX entry points; the durable `.agentflow` s
 - No destructive Git reset behavior in Agentflow itself.
 - Agentflow runtime artifacts are isolated from implementation fingerprints.
 - Pattern validation catches invalid transitions and duplicate stages before execution.
+- Pattern requirements block a run before its first stage (readiness and capabilities are never remediated); isolated runs work in their own worktree, which is never force-removed.
 
 ## Current limitations
 
