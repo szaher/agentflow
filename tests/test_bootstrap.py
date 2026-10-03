@@ -73,6 +73,7 @@ class InitTests(unittest.TestCase):
         for label, fake, message in (
             ("different provider", FakeAgentic(installed=[installed_provider(OTHER)]), "--update-provider"),
             ("hand-edited block", FakeAgentic(block_status="conflict"), "edited by hand"),
+            ("unmanaged skill", FakeAgentic(skills_status="conflict"), "unmanaged skill"),
         ):
             with self.subTest(label):
                 root = Path(tempfile.mkdtemp())
@@ -80,10 +81,13 @@ class InitTests(unittest.TestCase):
                     init_project(root, ProjectConfig(), agentic=fake)
                 self.assertEqual(list(root.iterdir()), [])
                 self.assertFalse(any(not b["dry_run"] for b in fake.blocks))
+                self.assertFalse(any(not c["dry_run"] for c in fake.skill_calls))
 
-    def test_unmanaged_skill_conflict_fails(self):
-        with self.assertRaisesRegex(BootstrapError, "unmanaged skill"):
-            init_project(self.root, ProjectConfig(), agentic=FakeAgentic(skills_status="conflict"))
+    def test_skill_activation_is_previewed_before_any_write(self):
+        fake = FakeAgentic()
+        init_project(self.root, ProjectConfig(), agentic=fake)
+        self.assertEqual([c["dry_run"] for c in fake.skill_calls], [True, False])
+        self.assertEqual({(c["target"], c["shared"]) for c in fake.skill_calls}, {("all", True)})
 
     def test_no_wholesale_writes_to_shared_files(self):
         for path in SRC.rglob("*.py"):

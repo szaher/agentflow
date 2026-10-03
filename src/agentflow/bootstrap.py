@@ -14,7 +14,9 @@ Ownership (v0.16 decisions 4 and 5):
   the OpenCode reviewer agent) are written atomically by AgentFlow.
 
 Everything that can fail is checked before the repository is touched: the
-Agentic Dev handshake, the provider policy, and a dry run of both blocks.
+Agentic Dev handshake, the provider policy, a dry run of both blocks, and a dry
+run of skill activation for every harness (an unmanaged ``SKILL.md`` in the way
+is a conflict found here, not after other files were written).
 """
 
 from __future__ import annotations
@@ -137,23 +139,36 @@ def init_project(root: Path, config: ProjectConfig | None = None, force: bool = 
         if preview["exit_code"] != 0:
             raise BootstrapError(f"{file}: {preview['status']}: {preview['reason']}. "
                                  "Nothing in the repository was changed.")
+    # 3. Dry-run skill activation: an unmanaged skill in any harness stops init here.
+    preview = _activate(agentic, root, dry_run=True)
+    if preview["status"] != "ok":
+        raise BootstrapError(f"{_unmanaged(preview)}. Nothing in the repository was changed.")
 
     result = BootstrapResult(provider_action=action, provider_state=before.state)
-    # 3. Files AgentFlow owns outright.
+    # 4. Files AgentFlow owns outright.
     for name in ("patterns", "evidence", "logs"):
         (af / name).mkdir(parents=True, exist_ok=True)
     result.written.append(save_config(root, config))
     result.written.append(_write_owned(af / ".gitignore", "state.json\nevidence/\nlogs/\n"))
     result.written.append(_write_owned(root / ".opencode" / "agents" / "agentflow-reviewer.md", OPENCODE_REVIEWER))
-    # 4. Shared instruction files: one managed block each, through Agentic Dev.
+    # 5. Shared instruction files: one managed block each, through Agentic Dev.
     for file, content in BLOCKS:
         document = agentic.put_block(root, file=file, owner=OWNER, block=BLOCK, content=content)
         result.blocks.append(document)
         if document["exit_code"] != 0:
             raise BootstrapError(f"{file}: {document['status']}: {document['reason']}")
-    # 5. The skill, placed and activated by Agentic Dev for every harness.
-    result.skills = agentic.activate_skills(root, [provider.SKILL_NAME], target="all", shared=True)
-    if result.skills["status"] != "ok":
-        skipped = [o["path"] for o in result.skills["outcomes"] if o["status"] == "skipped-unmanaged"]
-        raise BootstrapError(f"an unmanaged skill is in the way, left untouched: {', '.join(skipped)}")
+    # 6. The skill, placed and activated by Agentic Dev for every harness.
+    result.skills = _activate(agentic, root)
+    if result.skills["status"] != "ok":  # appeared since the preflight
+        raise BootstrapError(_unmanaged(result.skills))
     return result
+
+
+def _activate(agentic: Agentic, root: Path, *, dry_run: bool = False) -> dict[str, Any]:
+    return agentic.activate_skills(root, [provider.SKILL_NAME], target="all", shared=True, dry_run=dry_run)
+
+
+def _unmanaged(document: dict[str, Any]) -> str:
+    skipped = [o["path"] for o in document["outcomes"] if o["status"] == "skipped-unmanaged"]
+    return (f"an unmanaged skill is in the way, left untouched: {', '.join(skipped)}; "
+            "move it aside or remove it, then rerun init")

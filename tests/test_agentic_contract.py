@@ -217,6 +217,21 @@ class BootstrapContractTests(unittest.TestCase):
             init_project(root, ProjectConfig(pattern="tdd"), force=True, agentic=Agentic(AGENTIC))
         self.assertEqual((agents.read_bytes(), (root / ".agentflow" / "config.json").read_bytes()), (snapshot, config))
 
+    def test_unmanaged_skill_in_any_harness_stops_init_with_zero_repository_changes(self):
+        from agentflow.bootstrap import BootstrapError, init_project
+        self.use(self.version_a)
+        for harness in (".claude", ".codex", ".pi", ".opencode"):
+            with self.subTest(harness):
+                root = self.repo(f"repo-{harness[1:]}")
+                (root / "AGENTS.md").write_text("# Team notes\n")
+                mine = root / harness / "skills" / "agentflow-sdlc" / "SKILL.md"
+                mine.parent.mkdir(parents=True)
+                mine.write_text("my own skill\n")
+                before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+                with self.assertRaisesRegex(BootstrapError, f"{harness}/skills/agentflow-sdlc/SKILL.md"):
+                    init_project(root, ProjectConfig(), agentic=Agentic(AGENTIC))
+                self.assertEqual({p: p.read_bytes() for p in root.rglob("*") if p.is_file()}, before)
+
     def test_doctor_facts(self):
         from agentflow.harnesses import detected
         document = Agentic(AGENTIC).doctor()

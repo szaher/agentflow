@@ -59,7 +59,7 @@ agentflow doctor
 `agentflow init` sets the project up through Agentic Dev and never rewrites shared files:
 
 - **Instructions:** AgentFlow's workflow text goes into one managed block, `agentflow.workflow`, in `AGENTS.md` and `CLAUDE.md`, placed by `agentic instructions block put`. Existing content is preserved byte for byte, re-running is a no-op, and a block you edited by hand stops `init` instead of being overwritten (`--force` included).
-- **Skill:** the `agentflow-sdlc` skill ships as an Agentic Dev *provider* bundled with AgentFlow. Agentic Dev installs it and places it for Claude Code, Codex, Pi, and OpenCode (`agentic skills add --shared`).
+- **Skill:** the `agentflow-sdlc` skill ships as an Agentic Dev *provider* bundled with AgentFlow. Agentic Dev installs it and places it for Claude Code, Codex, Pi, and OpenCode (`agentic skills add --shared`). A `SKILL.md` of your own already at one of those paths stops `init` before anything in the repository changes; move it aside and rerun.
 - **Files AgentFlow owns:** `.agentflow/` and the OpenCode reviewer agent `.opencode/agents/agentflow-reviewer.md`.
 
 The provider lives in your global Agentic Dev registry, so `init` is careful with it:
@@ -72,10 +72,10 @@ The provider lives in your global Agentic Dev registry, so `init` is careful wit
 
 Replace a different provider only on purpose: `agentflow provider install --replace` or `agentflow init --update-provider`. With `--no-provider-install`, `init` never touches global state and fails unless the provider is already current. `agentflow provider status` shows where you stand.
 
-Commit the generated project integration files before beginning real work:
+Commit the generated project integration files before beginning real work. From `.agentic/`, commit only `skills.json`; other Agentic Dev state there is local:
 
 ```bash
-git add AGENTS.md CLAUDE.md .agentflow .agentic .claude .codex .pi .opencode
+git add AGENTS.md CLAUDE.md .agentflow .agentic/skills.json .claude .codex .pi .opencode
 git commit -m "chore: enable Agentflow"
 ```
 

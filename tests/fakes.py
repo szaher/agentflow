@@ -33,6 +33,7 @@ class FakeAgentic:
         self.tools = set(tools)
         self.provider_adds: list[dict] = []
         self.blocks: list[dict] = []
+        self.skill_calls: list[dict] = []
 
     def handshake(self):
         if self.unavailable:
@@ -79,10 +80,11 @@ def _bootstrap_methods():
                 "status": self.block_status, "exit_code": 0 if ok else 1, "dry_run": dry_run,
                 "reason": None if ok else "managed block agentflow.workflow was edited by hand"}
 
-    def activate_skills(self, root, names, *, target="all", shared=True):
+    def activate_skills(self, root, names, *, target="all", shared=True, dry_run=False):
         self.handshake()
+        self.skill_calls.append({"names": list(names), "target": target, "shared": shared, "dry_run": dry_run})
         status = "skipped-unmanaged" if self.skills_status == "conflict" else "written"
-        return {"document_type": "agentic.skills-activation", "status": self.skills_status,
+        return {"document_type": "agentic.skills-activation", "status": self.skills_status, "dry_run": dry_run,
                 "exit_code": 0 if self.skills_status == "ok" else 1,
                 "outcomes": [{"skill": n, "harness": "claude", "path": f".claude/skills/{n}/SKILL.md", "status": status}
                              for n in names]}

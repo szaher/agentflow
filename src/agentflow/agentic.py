@@ -39,7 +39,7 @@ CHANGE_AWARE_FEATURE = "verification.change-aware"
 BOOTSTRAP_CONTRACTS = {"contracts": "1", "provider-source": "1", "providers": "1", "provider-install": "1",
                        "skills-activation": "1", "instruction-block": "1"}
 BOOTSTRAP_FEATURES = ("instructions.managed-block", "providers.inspect", "providers.install-pinned",
-                      "skills.activation-report")
+                      "skills.activation-dry-run", "skills.activation-report")
 DOCTOR_CONTRACTS = {"contracts": "1", "doctor": "1"}
 VERIFY_STATUSES = ("passed", "failed", "no-checks")
 
@@ -189,15 +189,22 @@ class Agentic:
         return self._validated("provider-install", document)
 
     def activate_skills(self, root: Path, names: list[str], *, target: str = "all",
-                        shared: bool = True) -> dict[str, Any]:
-        """Place skills in the repository (skills-activation v1). Exit 1 (conflict) is a result."""
+                        shared: bool = True, dry_run: bool = False) -> dict[str, Any]:
+        """Place skills in the repository (skills-activation v1). Exit 1 (conflict) is a result.
+
+        ``dry_run`` writes nothing and reports what a real run would do, conflicts included.
+        """
 
         self._bootstrap()
         args = ["skills", "add", *names, "--path", str(root), "--target", target, "--json"]
         if shared:
             args.append("--shared")
+        if dry_run:
+            args.append("--dry-run")
         code, document = self._call(args, cwd=root, ok=(0, 1))
         self._validated("skills-activation", document)
+        if document["dry_run"] is not dry_run:
+            raise AgenticError(f"`agentic skills add` answered dry_run={document['dry_run']}, asked {dry_run}")
         if code != document["exit_code"]:
             raise AgenticError(f"`agentic skills add` status {document['status']} disagrees with exit {code}")
         return document
