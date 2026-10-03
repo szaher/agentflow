@@ -8,11 +8,14 @@ rm -rf "$INSTALL_ROOT"
 mkdir -p "$INSTALL_ROOT"
 cp -R "$SRC/src" "$SRC/bin" "$SRC/examples" "$INSTALL_ROOT/"
 cp "$SRC/README.md" "$SRC/ARCHITECTURE.md" "$SRC/LICENSE" "$SRC/pyproject.toml" "$INSTALL_ROOT/"
+# A private environment for AgentFlow's runtime dependency (jsonschema).
+python3 -m venv "$INSTALL_ROOT/.venv"
+"$INSTALL_ROOT/.venv/bin/python" -m pip install --quiet --disable-pip-version-check "jsonschema>=4.23"
 cat > "$BIN_DIR/agentflow" <<WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
 export PYTHONPATH="$INSTALL_ROOT/src\${PYTHONPATH:+:\$PYTHONPATH}"
-exec python3 -m agentflow "\$@"
+exec "$INSTALL_ROOT/.venv/bin/python" -m agentflow "\$@"
 WRAPPER
 chmod +x "$BIN_DIR/agentflow"
 echo "Installed Agentflow to $INSTALL_ROOT"

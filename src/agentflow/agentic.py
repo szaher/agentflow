@@ -7,6 +7,10 @@ CLI and reads its documented contracts. It never imports Agentic Dev and never
 infers compatibility from ``agentic --version``. Instead it checks the
 ``agentic contracts`` handshake for the contract versions and features it needs.
 
+Every document AgentFlow consumes is validated against the schema the
+installed ``agentic`` ships (``agentic contracts schema NAME``); a document that
+does not match fails closed.
+
 There is deliberately no fallback: if ``agentic`` is missing or incompatible,
 gates cannot run and AgentFlow says so.
 """
@@ -48,6 +52,7 @@ class Agentic:
         self.executable = executable or os.environ.get("AGENTFLOW_AGENTIC") or shutil.which("agentic")
         self.timeout = timeout
         self._contracts: dict[str, Any] | None = None
+        self._schemas: dict[str, dict[str, Any]] = {}
 
     def _call(self, args: list[str], cwd: Path | None = None, ok: tuple[int, ...] = (0,)) -> tuple[int, dict[str, Any]]:
         if not self.executable:
@@ -68,6 +73,22 @@ class Agentic:
             raise AgenticError(f"`agentic {' '.join(args[:3])}` returned an unexpected document")
         return cp.returncode, document
 
+    def _validated(self, contract: str, document: dict[str, Any]) -> dict[str, Any]:
+        """Fail closed unless ``document`` matches the installed agentic's own schema for ``contract``."""
+
+        try:
+            import jsonschema
+        except ImportError as exc:  # runtime dependency; see pyproject.toml
+            raise AgenticUnavailable("jsonschema is required to validate Agentic Dev documents; reinstall agentflow") from exc
+        if contract not in self._schemas:
+            _, self._schemas[contract] = self._call(["contracts", "schema", contract])
+        try:
+            jsonschema.validate(document, self._schemas[contract])
+        except jsonschema.ValidationError as exc:
+            where = "/".join(str(part) for part in exc.absolute_path) or "document"
+            raise AgenticError(f"`agentic` returned an invalid {contract} document ({where}: {exc.message})") from exc
+        return document
+
     def handshake(self) -> dict[str, Any]:
         """The contracts document, after checking everything AgentFlow requires is offered."""
 
@@ -81,6 +102,10 @@ class Agentic:
             raise AgenticUnavailable(f"`agentic` has no compatibility handshake ({exc}); {INSTALL_HINT}") from exc
         if document.get("document_type") != "agentic.contracts" or document.get("schema_version") != "1":
             raise AgenticUnavailable(f"unsupported `agentic contracts` document; {INSTALL_HINT}")
+        try:
+            self._validated("contracts", document)
+        except AgenticError as exc:
+            raise AgenticUnavailable(f"{exc}; {INSTALL_HINT}") from exc
         offered = document.get("contracts") or {}
         missing = [f"{name}@{version}" for name, version in REQUIRED_CONTRACTS.items()
                    if version not in (offered.get(name) or [])]
@@ -98,8 +123,7 @@ class Agentic:
 
         self.handshake()
         _, document = self._call(["repo", "inspect", str(root), "--json"], cwd=root)
-        if document.get("document_type") != "agentic.repo-inspection":
-            raise AgenticError("unexpected `agentic repo inspect` document")
+        self._validated("repo-inspection", document)
         return {item["kind"] for item in document.get("discovered_commands") or []}
 
     def verify(self, root: Path, *, kinds: list[str], commands: list[str], include_changed: bool = False,
@@ -119,8 +143,9 @@ class Agentic:
             if base:
                 args += ["--base", base]
         code, document = self._call(args, cwd=root, ok=(0, 1))
-        if document.get("document_type") != "agentic.verification-run" or document.get("status") not in VERIFY_STATUSES:
-            raise AgenticError("unexpected `agentic verify run` document")
+        self._validated("verification-run", document)
+        if document.get("status") not in VERIFY_STATUSES:
+            raise AgenticError(f"unexpected verification status {document.get('status')!r}")
         expected_exit = 0 if document["status"] == "passed" else 1
         if code != expected_exit:
             raise AgenticError(f"`agentic verify run` status {document['status']} disagrees with exit {code}")

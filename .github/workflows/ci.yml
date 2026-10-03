@@ -21,4 +21,8 @@ jobs:
       - run: python -m unittest discover -s tests -v
         env:
           AGENTFLOW_REQUIRE_AGENTIC: "1"
-      - run: python -m compileall -q src tests
+      - name: Repo-local installer (private venv with jsonschema)
+        run: |
+          AGENTFLOW_INSTALL_ROOT=/tmp/af-install AGENTFLOW_BIN_DIR=/tmp/af-bin bash install.sh
+          /tmp/af-install/.venv/bin/python -c 'import jsonschema'
+          /tmp/af-bin/agentflow patterns >/dev/null

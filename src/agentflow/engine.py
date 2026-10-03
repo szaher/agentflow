@@ -86,11 +86,10 @@ class Engine:
 
     def _gate(self, stage: Stage) -> str:
         profile = stage.gate_profile or self.project.config.gate_profile
-        include_changed = bool(stage.metadata.get("include_changed", False))
         fp = implementation_fingerprint(self.root)
         try:
-            gate = run_gates(self.root, self.project.config, profile, agentic=self.agentic,
-                             include_changed=include_changed, base=self.state.base_commit)
+            # Workflow gates are full-project only; change-aware augmentation is not a stage option yet.
+            gate = run_gates(self.root, self.project.config, profile, agentic=self.agentic)
         except (AgenticError, ValueError) as exc:
             # A missing or incompatible verifier is not a code failure: block, do not retry implementation.
             record(self.state, "gates_unavailable", stage=stage.id, profile=profile, error=str(exc))
@@ -102,7 +101,7 @@ class Engine:
         self.state.evidence.append({"kind": "gates", "path": str(path.relative_to(self.root)), "fingerprint": fp,
                                     "passed": passed, "status": gate.status})
         record(self.state, "gates", stage=stage.id, profile=profile, passed=passed, status=gate.status,
-               count=len(gate.results))
+               checks_executed=(gate.verification or {}).get("checks_executed", 0))
         self.state.fingerprint = fp
         save_state(self.root, self.state)
         self._transition(stage.on_success if passed else stage.on_failure, f"gates {gate.status}: {gate.reason}")

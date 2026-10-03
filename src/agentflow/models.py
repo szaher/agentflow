@@ -79,7 +79,7 @@ class RunState:
     executor: str = "claude"
     reviewers: list[str] = field(default_factory=list)
     fingerprint: str | None = None
-    base_commit: str | None = None
+    run_start_commit: str | None = None
     plan_hash: str | None = None
     awaiting_reason: str | None = None
     history: list[dict[str, Any]] = field(default_factory=list)
@@ -100,19 +100,6 @@ class HarnessResult:
     stderr: str
     command: list[str]
     changed: bool | None = None
-
-@dataclass(slots=True)
-class GateResult:
-    name: str
-    command: str
-    returncode: int
-    stdout: str
-    stderr: str
-    duration_s: float
-
-    @property
-    def passed(self) -> bool:
-        return self.returncode == 0
 
 @dataclass(slots=True)
 class Project:

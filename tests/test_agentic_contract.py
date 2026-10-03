@@ -69,7 +69,7 @@ class AgenticContractTests(unittest.TestCase):
         gate = run_gates(root, ProjectConfig(), "fast", agentic=self.agentic)
         jsonschema.validate(gate.verification, self.schema("verification-run"))
         self.assertEqual((gate.status, gate.plan.kinds), ("passed", ["test"]))
-        self.assertEqual([(r.name, r.command) for r in gate.results], [("test", "make check")])
+        self.assertEqual([(r["kind"], r["command"]) for r in gate.results], [("test", "make check")])
         self.assertTrue((root / "ran-make-check").exists())
 
     def test_explicit_gate_failure_and_change_aware_augmentation(self):
@@ -77,13 +77,25 @@ class AgenticContractTests(unittest.TestCase):
         base = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
         failed = run_gates(root, ProjectConfig(gates={"fast": ["exit 3"]}), "fast", agentic=self.agentic)
         jsonschema.validate(failed.verification, self.schema("verification-run"))
-        self.assertEqual((failed.status, failed.results[0].returncode), ("failed", 3))
+        self.assertEqual((failed.status, failed.results[0]["returncode"], failed.results[0]["kind"]),
+                         ("failed", 3, "custom"))
 
         (root / "app.py").write_text("x = 2\n")
         augmented = run_gates(root, ProjectConfig(), "fast", agentic=self.agentic, include_changed=True, base=base)
         jsonschema.validate(augmented.verification, self.schema("verification-run"))
         self.assertEqual(augmented.status, "passed")
         self.assertEqual(augmented.verification["requested_kinds"], ["test", "lint"])
+
+    @unittest.skipUnless(shutil.which("npm") or REQUIRED, "needs npm")
+    def test_every_command_of_a_required_kind_runs(self):
+        root = self.repo({"README.md": "# x\n", "app.py": "x = 1\n",
+                          "Makefile": "test:\n\ttouch ran-make\n",
+                          "package.json": json.dumps({"scripts": {"test": "node -e \"require('fs').writeFileSync('ran-npm','')\""}})})
+        gate = run_gates(root, ProjectConfig(), "fast", agentic=self.agentic)
+        jsonschema.validate(gate.verification, self.schema("verification-run"))
+        self.assertEqual(gate.status, "passed")
+        self.assertEqual([r["command"] for r in gate.results], ["make test", "npm run test"])
+        self.assertTrue((root / "ran-make").exists() and (root / "ran-npm").exists())
 
     def test_no_discovered_commands_never_passes(self):
         root = self.repo({"README.md": "# docs only\n"})

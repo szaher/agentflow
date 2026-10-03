@@ -84,7 +84,7 @@ def _make_state(task: str, pattern_name: str | None, agent: str | None, reviewer
     pattern = load_pattern(pattern_name, project.root)
     executor = agent or project.config.executor
     revs = [x for x in reviewers.split(",") if x] if reviewers is not None else project.config.reviewers
-    state = new_state(task, pattern.name, pattern.entry, executor, revs, base_commit=head_commit(project.root))
+    state = new_state(task, pattern.name, pattern.entry, executor, revs, run_start_commit=head_commit(project.root))
     save_state(project.root, state)
     return project, state
 
@@ -123,17 +123,20 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    project = load_project(); load_state(project.root)
+    project = load_project(); state = load_state(project.root)
     profile = args.profile or project.config.gate_profile
     try:
-        gate = run_gates(project.root, project.config, profile)
-    except AgenticError as exc:
+        gate = run_gates(project.root, project.config, profile, include_changed=args.include_changed,
+                         base=state.run_start_commit if args.include_changed else None)
+    except (AgenticError, ValueError) as exc:
         print(f"agentflow: {exc}", file=sys.stderr); return 2
     for r in gate.results:
-        print(f"{'PASS' if r.returncode == 0 else 'FAIL'} {r.name}: {r.command} ({r.duration_s:.2f}s)")
-        if r.returncode != 0:
-            if r.stdout: print(r.stdout[-4000:])
-            if r.stderr: print(r.stderr[-4000:], file=sys.stderr)
+        label = r.get("command") or r.get("test_file") or r.get("capability") or "-"
+        mark = "PASS" if r.get("success") else ("SKIP" if r.get("success") is None else "FAIL")
+        print(f"{mark} {r.get('kind')}: {label} ({float(r.get('duration_ms', 0)) / 1000:.2f}s)")
+        if r.get("success") is False:
+            if r.get("stdout"): print(r["stdout"][-4000:])
+            if r.get("stderr"): print(r["stderr"][-4000:], file=sys.stderr)
     print(f"verification: {gate.status} ({gate.reason})")
     return 0 if gate.passed else 1
 
@@ -170,7 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
     q=sp.add_parser("run"); q.add_argument("task"); q.add_argument("--pattern"); q.add_argument("--agent"); q.add_argument("--reviewers"); q.add_argument("--dry-run", action="store_true"); q.add_argument("--max-steps", type=int, default=100); q.set_defaults(func=cmd_run)
     q=sp.add_parser("step"); q.set_defaults(func=cmd_step)
     q=sp.add_parser("status"); q.set_defaults(func=cmd_status)
-    q=sp.add_parser("verify"); q.add_argument("--profile", choices=["fast","standard","strict"]); q.set_defaults(func=cmd_verify)
+    q=sp.add_parser("verify"); q.add_argument("--profile", choices=["fast","standard","strict"]); q.add_argument("--include-changed", action="store_true", help="add change-aware checks since the run's start commit (never removes any)"); q.set_defaults(func=cmd_verify)
     q=sp.add_parser("approve"); q.add_argument("--continue-run", action="store_true"); q.set_defaults(func=cmd_approve)
     q=sp.add_parser("explain"); q.add_argument("pattern", nargs="?"); q.set_defaults(func=cmd_explain)
     return p

@@ -1,16 +1,16 @@
 """Deterministic verification gates, executed by Agentic Dev.
 
-AgentFlow decides *what* a gate requires; Agentic Dev discovers and runs the
-commands (``agentic verify run``). A gate is full-project verification:
+AgentFlow decides *which verification kinds matter*; Agentic Dev decides which
+concrete commands implement each kind and runs them (``agentic verify run``).
+AgentFlow holds no repository or tool knowledge of its own:
 
-- a profile names command kinds: ``fast`` = lint + test; ``standard`` and
-  ``strict`` = lint + typecheck + test + build. Every discovered command of
-  each of those kinds runs;
+- a profile names kinds; the gate requests the profile's kinds that Agentic Dev
+  actually discovered, and Agentic Dev runs **every** command of each;
 - explicit ``gates`` in ``.agentflow/config.json`` replace discovery for that
-  profile and still execute through Agentic Dev (no AgentFlow shell fallback);
-- a gate with nothing to run fails: zero checks is never success;
-- change-aware checks (stage metadata ``include_changed``) can only be added on
-  top of the full baseline, using the run-start commit as the base.
+  profile and still execute through Agentic Dev (``--command``), never a shell;
+- a gate with nothing to run fails closed; only an explicit ``passed`` passes;
+- change-aware checks (``include_changed``) can only add to the full baseline,
+  using the run-start commit as the base. Workflow gate stages are full-only.
 """
 
 from __future__ import annotations
@@ -20,12 +20,12 @@ from pathlib import Path
 from typing import Any
 
 from .agentic import Agentic
-from .models import GateResult, ProjectConfig
+from .models import ProjectConfig
 
 PROFILE_KINDS: dict[str, tuple[str, ...]] = {
     "fast": ("lint", "test"),
-    "standard": ("lint", "typecheck", "test", "build"),
-    "strict": ("lint", "typecheck", "test", "build"),
+    "standard": ("lint", "typecheck", "test"),
+    "strict": ("build", "lint", "typecheck", "test"),
 }
 
 
@@ -37,18 +37,26 @@ class GatePlan:
     include_changed: bool = False
     base: str | None = None
 
+    def to_dict(self) -> dict[str, Any]:
+        return {"profile": self.profile, "kinds": self.kinds, "commands": self.commands,
+                "include_changed": self.include_changed, "base": self.base}
+
 
 @dataclass
 class GateRun:
-    status: str  # passed | failed | no-checks
-    results: list[GateResult]
+    status: str  # passed | failed | no-checks; Agentic Dev's status when it ran
     plan: GatePlan
     reason: str
+    # The validated agentic.verification-run document, unmodified; None when nothing was requested.
     verification: dict[str, Any] | None = field(default=None, repr=False)
 
     @property
     def passed(self) -> bool:
         return self.status == "passed"
+
+    @property
+    def results(self) -> list[dict[str, Any]]:
+        return list((self.verification or {}).get("results") or [])
 
 
 def plan_gate(root: Path, config: ProjectConfig, profile: str, *, agentic: Agentic,
@@ -69,25 +77,13 @@ def run_gates(root: Path, config: ProjectConfig, profile: str, *, agentic: Agent
     plan = plan_gate(root, config, profile, agentic=agentic, include_changed=include_changed, base=base)
     if not plan.kinds and not plan.commands:
         wanted = ", ".join(PROFILE_KINDS[profile])
-        return GateRun("no-checks", [], plan,
+        return GateRun("no-checks", plan,
                        f"no {wanted} commands were discovered; configure .agentflow/config.json -> gates.{profile}")
     document = agentic.verify(root, kinds=plan.kinds, commands=plan.commands,
                               include_changed=plan.include_changed, base=plan.base)
-    results = [
-        GateResult(
-            name=item.get("kind", "check"),
-            command=item.get("command") or item.get("test_file") or item.get("capability") or "",
-            returncode=item.get("returncode") if item.get("returncode") is not None else (0 if item.get("success") else 1),
-            stdout=item.get("stdout", ""),
-            stderr=item.get("stderr", "") or item.get("error", ""),
-            duration_s=float(item.get("duration_ms", 0.0)) / 1000,
-        )
-        for item in document.get("results", [])
-        if item.get("executed")
-    ]
-    status = document["status"]
+    status = document["status"]  # authoritative
     if document.get("missing_kinds"):
         reason = f"no runnable command for: {', '.join(document['missing_kinds'])}"
     else:
         reason = {"passed": "gates passed", "failed": "gates failed", "no-checks": "no checks were executed"}[status]
-    return GateRun(status, results, plan, reason, document)
+    return GateRun(status, plan, reason, document)
