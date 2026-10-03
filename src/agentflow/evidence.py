@@ -1,22 +1,25 @@
 from __future__ import annotations
 
 from pathlib import Path
-from .models import GateResult, RunState
+from .gates import GateRun
+from .models import RunState
 from .util import atomic_json, now_iso
 
 
-def write_gate_evidence(root: Path, state: RunState, results: list[GateResult], fingerprint: str) -> Path:
+def write_gate_evidence(root: Path, state: RunState, gate: GateRun, fingerprint: str) -> Path:
+    """AgentFlow's envelope around Agentic Dev's unmodified verification-run document."""
+
     data = {
         "run_id": state.run_id,
         "stage": state.stage,
         "at": now_iso(),
         "fingerprint": fingerprint,
-        "passed": all(r.passed for r in results),
-        "results": [
-            {"name": r.name, "command": r.command, "returncode": r.returncode,
-             "stdout": r.stdout[-20000:], "stderr": r.stderr[-20000:], "duration_s": r.duration_s}
-            for r in results
-        ],
+        "profile": gate.plan.profile,
+        "passed": gate.passed,
+        "status": gate.status,
+        "reason": gate.reason,
+        "plan": gate.plan.to_dict(),
+        "verification": gate.verification,
     }
     path = root / ".agentflow" / "evidence" / state.run_id / f"{state.stage}-gates.json"
     atomic_json(path, data)

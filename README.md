@@ -8,20 +8,20 @@ It does not replace Claude Code, Codex, Pi, OpenCode, or another coding agent. T
 
 ## What is included
 
-- Installable Python 3.11+ CLI with no runtime Python dependencies.
+- Installable Python 3.11+ CLI. Runtime requirements: `jsonschema` (to validate Agentic Dev's documents) and the [Agentic Dev](https://github.com/szaher/agentic-dev) `agentic` CLI for repository facts and verification. AgentFlow never imports Agentic Dev's Python code.
 - First-class adapters for **Claude Code**, **Codex**, **Pi**, and **OpenCode**.
 - Generic command adapter for any other non-interactive coding-agent CLI.
 - 21 built-in Agentic SDLC patterns.
 - Repository-local durable run state and evidence.
 - Git-diff fingerprints so verification evidence is tied to the code it verified.
-- Automatic deterministic gate detection for Python, Node/TypeScript, Go, Rust, and Make projects.
-- Configurable custom gates for any stack.
+- Deterministic gates discovered and executed by Agentic Dev (`agentic verify run`) for any stack Agentic Dev supports.
+- Configurable custom gates for any stack, also executed by Agentic Dev.
 - Independent read-only review with post-run worktree mutation detection.
 - Risk-sensitive human approval support.
 - Cross-harness review: e.g. Claude implements, Codex and Pi review.
 - Generated `AGENTS.md`, `CLAUDE.md`, and Agent Skills for compatible harnesses.
 - OpenCode read-only reviewer configuration.
-- Unit/integration tests using only the Python standard library.
+- Unit tests using only the Python standard library, plus contract tests against the installed `agentic` CLI (jsonschema, test-only).
 
 ## Install
 
@@ -32,7 +32,7 @@ cd agentflow-meta-harness
 agentflow --version
 ```
 
-The default installer is intentionally zero-dependency: it copies the source under `~/.local/share/agentflow-meta` and installs a launcher under `~/.local/bin`. It does not need PyPI access.
+The default installer copies the source under `~/.local/share/agentflow-meta`, creates a private virtual environment there for AgentFlow's one runtime dependency (`jsonschema`), and installs a launcher under `~/.local/bin`. Install Agentic Dev (`agentic`) separately.
 
 You can also run directly from the extracted directory without installing:
 
@@ -181,7 +181,19 @@ Agentflow intentionally uses a coarse adapter boundary. It does not reimplement 
 
 ## Deterministic verification
 
-`agentflow verify` auto-detects common project checks. You can override each profile in `.agentflow/config.json`:
+AgentFlow decides **what a gate requires**; [Agentic Dev](https://github.com/szaher/agentic-dev) **discovers and runs the commands**. The `agentic` CLI is a hard prerequisite: AgentFlow talks to it only through process + JSON contracts, checks `agentic contracts --json` for the contracts and features it needs (never the version), and has no fallback of its own. If `agentic` is missing or incompatible, `agentflow doctor` and `agentflow verify` say so and a gate stage **blocks** the run instead of retrying the implementation. Set `AGENTFLOW_AGENTIC` to use a specific binary.
+
+A gate is full-project verification. Each profile names the command kinds it **requires**, and Agentic Dev runs **every** command it discovers for each:
+
+| Profile | Kinds |
+|---|---|
+| `fast` | lint, test |
+| `standard` | lint, typecheck, test |
+| `strict` | build, lint, typecheck, test |
+
+Profiles are defined in terms of *kinds*, not tools. AgentFlow decides which kinds are required and always requests all of them; Agentic Dev decides whether each can be satisfied and which concrete commands implement it (for example `make check`, `uv run pytest`, `pnpm test`). If **any** required kind has no command, Agentic Dev reports `no-checks` with the `missing_kinds` and runs nothing, and the gate fails: for example, `fast` fails on a repository with tests but no lint command. `agentflow doctor` lists the required kinds and which ones have no command yet.
+
+You can override each profile in `.agentflow/config.json`; explicit commands replace the profile's kinds and still execute through Agentic Dev. AgentFlow passes each command intact as a single argument and never invokes a shell itself; Agentic Dev's execution backend runs it:
 
 ```json
 {
@@ -193,7 +205,15 @@ Agentflow intentionally uses a coarse adapter boundary. It does not reimplement 
 }
 ```
 
-A gate stage with zero detected/configured checks **fails closed**; Agentflow never treats “nothing ran” as verification.
+A gate stage with zero discovered/configured checks **fails closed** (`no-checks`); AgentFlow never treats “nothing ran” as verification.
+
+Each run records the commit it started from (`run_start_commit`; none for a repository with no commits yet). Workflow gate stages are full-project only. `agentflow verify --include-changed` additionally asks Agentic Dev for change-aware checks since that commit; they can only add to the full baseline, never remove a check.
+
+Every Agentic Dev document AgentFlow consumes is validated against the schema the installed `agentic` ships; an invalid response fails closed. Gate evidence is an AgentFlow envelope (run, stage, fingerprint, profile, status) around Agentic Dev's unmodified `agentic.verification-run` document.
+
+### Migration from the built-in detector
+
+Gate commands now come from Agentic Dev's canonical discovery, so some differ from earlier AgentFlow: Python tests run as `uv run pytest` rather than `python -m pytest -q`; package scripts use the lockfile's runner (`pnpm`, `yarn`, `bun run`); Rust `cargo check` and Go `go vet` are no longer added implicitly (use `strict` with a project `lint`/`build` command, or explicit `gates`); `make check` counts as a test command when there is no `make test`. Use `gates` in `.agentflow/config.json` to pin exact commands.
 
 ## Evidence freshness
 

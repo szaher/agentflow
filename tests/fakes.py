@@ -1,0 +1,112 @@
+"""Test doubles for Agentic Dev (unit tests only; contract tests use the real installed CLI)."""
+
+from __future__ import annotations
+
+import json
+import stat
+import sys
+from pathlib import Path
+
+from agentflow.agentic import REQUIRED_FEATURES, AgenticUnavailable
+
+
+class FakeAgentic:
+    """Answers like the Agentic client would, recording every verify request.
+
+    Like Agentic Dev, a requested kind it has no command for makes the run
+    ``no-checks`` with ``missing_kinds`` and executes nothing.
+    """
+
+    def __init__(self, kinds=("lint", "test"), status="passed", missing=(), unavailable=None):
+        self.kinds = set(kinds)
+        self.status = status
+        self.missing = list(missing)
+        self.unavailable = unavailable
+        self.calls: list[dict] = []
+
+    def handshake(self):
+        if self.unavailable:
+            raise AgenticUnavailable(self.unavailable)
+        return {"document_type": "agentic.contracts", "features": []}
+
+    def supports(self, feature):
+        return True
+
+    def discovered_kinds(self, root):
+        self.handshake()
+        return set(self.kinds)
+
+    def verify(self, root, *, kinds, commands, include_changed=False, base=None):
+        self.handshake()
+        self.calls.append({"kinds": list(kinds), "commands": list(commands),
+                           "include_changed": include_changed, "base": base})
+        missing = self.missing or [kind for kind in kinds if kind not in self.kinds]
+        if missing:
+            return verification_document("no-checks", kinds, commands, missing)
+        return verification_document(self.status, kinds, commands, [])
+
+
+def verification_document(status, kinds=(), commands=(), missing=()):
+    ok = status == "passed"
+    results = [] if status == "no-checks" else [
+        {"kind": kind, "command": f"run-{kind}", "executed": True, "success": ok, "returncode": 0 if ok else 1,
+         "stdout": "", "stderr": "", "duration_ms": 5.0, "reason": "r"} for kind in kinds
+    ] + [
+        {"kind": "custom", "command": command, "executed": True, "success": ok, "returncode": 0 if ok else 1,
+         "stdout": "", "stderr": "", "duration_ms": 5.0, "reason": "r"} for command in commands
+    ]
+    return {"schema_version": "1", "document_type": "agentic.verification-run", "status": status,
+            "success": ok, "mode": "full", "requested_kinds": list(kinds), "missing_kinds": list(missing),
+            "checks_executed": len(results), "results": results}
+
+
+GOOD_CONTRACTS = {
+    "schema_version": "1", "document_type": "agentic.contracts",
+    "contracts": {"contracts": ["1"], "repo-inspection": ["1"], "verification-run": ["1"]},
+    "features": [*REQUIRED_FEATURES, "verification.change-aware"],
+}
+
+# Minimal stand-ins for the schemas a real `agentic contracts schema NAME` returns.
+SCHEMAS = {
+    "contracts": {"type": "object", "required": ["document_type", "contracts", "features"]},
+    "repo-inspection": {"type": "object", "required": ["document_type", "discovered_commands"],
+                        "properties": {"document_type": {"const": "agentic.repo-inspection"}}},
+    "verification-run": {"type": "object", "required": ["document_type", "status", "success", "results"],
+                         "properties": {"document_type": {"const": "agentic.verification-run"},
+                                        "status": {"enum": ["passed", "failed", "no-checks"]}}},
+}
+
+
+def fake_cli(directory: Path, *, contracts=GOOD_CONTRACTS, inspection=None, verify=None, verify_exit=0) -> str:
+    """A stand-in `agentic` executable with canned JSON; every argv is logged to `calls.jsonl`."""
+
+    script = directory / "agentic"
+    log = directory / "calls.jsonl"
+    payload = json.dumps({"contracts": contracts, "schemas": SCHEMAS,
+                          "inspection": inspection or {"document_type": "agentic.repo-inspection",
+                                                       "discovered_commands": [{"kind": "test", "command": "t",
+                                                                                "source": "Makefile"}]},
+                          "verify": verify or verification_document("passed", ["test"])})
+    script.write_text(f"""#!{sys.executable}
+import json, sys
+data = json.loads({payload!r})
+args = sys.argv[1:]
+with open({str(log)!r}, "a") as handle:
+    handle.write(json.dumps(args) + "\\n")
+if args[:2] == ["contracts", "schema"]:
+    print(json.dumps(data["schemas"][args[2]])); sys.exit(0)
+if args[:1] == ["contracts"]:
+    print(json.dumps(data["contracts"])); sys.exit(0)
+if args[:2] == ["repo", "inspect"]:
+    print(json.dumps(data["inspection"])); sys.exit(0)
+if args[:2] == ["verify", "run"]:
+    print(json.dumps(data["verify"])); sys.exit({verify_exit})
+sys.exit(2)
+""")
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return str(script)
+
+
+def logged_calls(directory: Path) -> list[list[str]]:
+    path = directory / "calls.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []

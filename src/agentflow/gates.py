@@ -1,70 +1,89 @@
+"""Deterministic verification gates, executed by Agentic Dev.
+
+AgentFlow decides *which verification kinds are required*; Agentic Dev decides
+whether each requirement can be satisfied, which concrete commands implement it,
+and runs them (``agentic verify run``). AgentFlow holds no repository or tool
+knowledge of its own:
+
+- a profile names required kinds, and every one is requested unchanged. Agentic
+  Dev runs **every** command of each kind, or, if any required kind has no
+  command, reports ``no-checks`` with ``missing_kinds`` and runs nothing;
+- explicit ``gates`` in ``.agentflow/config.json`` replace the profile's kinds
+  and still execute through Agentic Dev: each is passed intact as one
+  ``--command`` argument (AgentFlow never invokes a shell itself; Agentic Dev's
+  execution backend runs it);
+- a gate with nothing to run fails closed; only an explicit ``passed`` passes;
+- change-aware checks (``include_changed``) can only add to the full baseline,
+  using the run-start commit as the base. Workflow gate stages are full-only.
+"""
+
 from __future__ import annotations
 
-import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
-from .models import GateResult, ProjectConfig
-from .util import run_command
+from .agentic import Agentic
+from .models import ProjectConfig
 
-DEFAULTS = {
-    "fast": [],
-    "standard": [],
-    "strict": [],
+PROFILE_KINDS: dict[str, tuple[str, ...]] = {
+    "fast": ("lint", "test"),
+    "standard": ("lint", "typecheck", "test"),
+    "strict": ("build", "lint", "typecheck", "test"),
 }
 
 
-def detected_commands(root: Path, profile: str = "standard") -> list[tuple[str, str]]:
-    cmds: list[tuple[str, str]] = []
-    # Python
-    if (root / "pyproject.toml").exists() or (root / "setup.py").exists():
-        if (root / "pyproject.toml").exists():
-            text = (root / "pyproject.toml").read_text(encoding="utf-8", errors="ignore")
-        else:
-            text = ""
-        if "pytest" in text or (root / "tests").exists():
-            cmds.append(("pytest", "python -m pytest -q"))
-        if "ruff" in text:
-            cmds.insert(0, ("ruff", "python -m ruff check ."))
-        if "mypy" in text and profile != "fast":
-            cmds.append(("mypy", "python -m mypy ."))
-    # Node
-    if (root / "package.json").exists():
-        import json
-        try:
-            pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
-            scripts = pkg.get("scripts", {})
-            runner = "npm"
-            if (root / "pnpm-lock.yaml").exists(): runner = "pnpm"
-            elif (root / "yarn.lock").exists(): runner = "yarn"
-            for name in ["lint", "typecheck", "test", "build"]:
-                if name in scripts and (profile != "fast" or name in {"lint", "test"}):
-                    cmds.append((name, f"{runner} run {name}"))
-        except Exception:
-            pass
-    if (root / "go.mod").exists():
-        cmds.append(("go-test", "go test ./..."))
-        if profile == "strict": cmds.append(("go-vet", "go vet ./..."))
-    if (root / "Cargo.toml").exists():
-        cmds.append(("cargo-test", "cargo test --quiet"))
-        if profile != "fast": cmds.insert(0, ("cargo-check", "cargo check --quiet"))
-    if (root / "Makefile").exists() and profile == "strict":
-        cmds.append(("make-check", "make check"))
-    return cmds
+@dataclass
+class GatePlan:
+    profile: str
+    kinds: list[str]
+    commands: list[str]
+    include_changed: bool = False
+    base: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"profile": self.profile, "kinds": self.kinds, "commands": self.commands,
+                "include_changed": self.include_changed, "base": self.base}
 
 
-def commands_for(root: Path, config: ProjectConfig, profile: str) -> list[tuple[str, str]]:
+@dataclass
+class GateRun:
+    status: str  # passed | failed | no-checks; Agentic Dev's status when it ran
+    plan: GatePlan
+    reason: str
+    # The validated agentic.verification-run document, unmodified.
+    verification: dict[str, Any] | None = field(default=None, repr=False)
+
+    @property
+    def passed(self) -> bool:
+        return self.status == "passed"
+
+    @property
+    def results(self) -> list[dict[str, Any]]:
+        return list((self.verification or {}).get("results") or [])
+
+
+def plan_gate(root: Path, config: ProjectConfig, profile: str, *, agentic: Agentic,
+              include_changed: bool = False, base: str | None = None) -> GatePlan:
+    if profile not in PROFILE_KINDS:
+        raise ValueError(f"unknown gate profile {profile!r}; choose one of: {', '.join(PROFILE_KINDS)}")
     custom = config.gates.get(profile)
     if custom:
-        return [(f"custom-{i+1}", cmd) for i, cmd in enumerate(custom)]
-    return detected_commands(root, profile)
+        return GatePlan(profile, [], list(custom), include_changed, base)
+    # The requirement is AgentFlow's; whether it can be met is Agentic Dev's answer.
+    return GatePlan(profile, list(PROFILE_KINDS[profile]), [], include_changed, base)
 
 
-def run_gates(root: Path, config: ProjectConfig, profile: str) -> list[GateResult]:
-    results: list[GateResult] = []
-    for name, command in commands_for(root, config, profile):
-        start = time.monotonic()
-        cp = run_command(command, root)
-        results.append(GateResult(name, command, cp.returncode, cp.stdout, cp.stderr, time.monotonic() - start))
-        if cp.returncode != 0:
-            break
-    return results
+def run_gates(root: Path, config: ProjectConfig, profile: str, *, agentic: Agentic | None = None,
+              include_changed: bool = False, base: str | None = None) -> GateRun:
+    agentic = agentic or Agentic()
+    plan = plan_gate(root, config, profile, agentic=agentic, include_changed=include_changed, base=base)
+    document = agentic.verify(root, kinds=plan.kinds, commands=plan.commands,
+                              include_changed=plan.include_changed, base=plan.base)
+    status = document["status"]  # authoritative
+    if document.get("missing_kinds"):
+        reason = (f"no runnable command for required kind(s): {', '.join(document['missing_kinds'])}; "
+                  f"add one to the project or configure .agentflow/config.json -> gates.{profile}")
+    else:
+        reason = {"passed": "gates passed", "failed": "gates failed", "no-checks": "no checks were executed"}[status]
+    return GateRun(status, plan, reason, document)

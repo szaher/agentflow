@@ -4,6 +4,7 @@ from pathlib import Path
 
 from .config import Project
 from .evidence import write_agent_evidence, write_gate_evidence, write_review_evidence
+from .agentic import Agentic, AgenticError
 from .gates import run_gates
 from .git import implementation_fingerprint
 from .harnesses import get as get_harness
@@ -18,8 +19,9 @@ class EngineError(RuntimeError):
     pass
 
 class Engine:
-    def __init__(self, project: Project, state: RunState):
+    def __init__(self, project: Project, state: RunState, agentic: Agentic | None = None):
         self.project = project
+        self.agentic = agentic or Agentic()
         self.root = project.root
         self.state = state
         self.pattern: Pattern = load_pattern(state.pattern, self.root)
@@ -85,17 +87,24 @@ class Engine:
     def _gate(self, stage: Stage) -> str:
         profile = stage.gate_profile or self.project.config.gate_profile
         fp = implementation_fingerprint(self.root)
-        results = run_gates(self.root, self.project.config, profile)
-        path = write_gate_evidence(self.root, self.state, results, fp)
-        passed = bool(results) and all(r.passed for r in results)
-        # Projects with no detected gates are not silently considered verified.
-        if not results:
-            passed = False
-        self.state.evidence.append({"kind": "gates", "path": str(path.relative_to(self.root)), "fingerprint": fp, "passed": passed})
-        record(self.state, "gates", stage=stage.id, profile=profile, passed=passed, count=len(results))
+        try:
+            # Workflow gates are full-project only; change-aware augmentation is not a stage option yet.
+            gate = run_gates(self.root, self.project.config, profile, agentic=self.agentic)
+        except (AgenticError, ValueError) as exc:
+            # A missing or incompatible verifier is not a code failure: block, do not retry implementation.
+            record(self.state, "gates_unavailable", stage=stage.id, profile=profile, error=str(exc))
+            self._transition("blocked", f"verification unavailable: {exc}")
+            return self.state.status
+        path = write_gate_evidence(self.root, self.state, gate, fp)
+        # Zero checks is never verification: only an explicit `passed` passes.
+        passed = gate.passed
+        self.state.evidence.append({"kind": "gates", "path": str(path.relative_to(self.root)), "fingerprint": fp,
+                                    "passed": passed, "status": gate.status})
+        record(self.state, "gates", stage=stage.id, profile=profile, passed=passed, status=gate.status,
+               checks_executed=(gate.verification or {}).get("checks_executed", 0))
         self.state.fingerprint = fp
         save_state(self.root, self.state)
-        self._transition(stage.on_success if passed else stage.on_failure, f"gates {'passed' if passed else 'failed'}")
+        self._transition(stage.on_success if passed else stage.on_failure, f"gates {gate.status}: {gate.reason}")
         return self.state.status
 
     def _review(self, stage: Stage) -> str:

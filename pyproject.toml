@@ -16,6 +16,10 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "License :: OSI Approved :: Apache Software License",
 ]
+# Validates Agentic Dev's JSON documents against the schemas the installed `agentic` ships.
+# The `agentic` CLI itself (package agentic-dev) is also required; it is declared here once a
+# release containing the v0.16 contracts is on PyPI. Until then CI installs it from a pinned commit.
+dependencies = ["jsonschema>=4.23"]
 
 [project.scripts]
 agentflow = "agentflow.cli:main"

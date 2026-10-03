@@ -47,3 +47,8 @@ def implementation_fingerprint(root: Path) -> str:
 
 def status_porcelain(root: Path) -> str:
     return git_text(root, ["status", "--porcelain=v1", "--untracked-files=all"])
+
+
+def head_commit(root: Path) -> str | None:
+    """The commit a run starts from; the stable base for change-aware verification."""
+    return git_text(root, ["rev-parse", "--verify", "--quiet", "HEAD"]).strip() or None

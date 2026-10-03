@@ -10,7 +10,8 @@ from .util import atomic_json, now_iso
 STATE_FILE = ".agentflow/state.json"
 
 
-def new_state(task: str, pattern: str, entry: str, executor: str, reviewers: list[str]) -> RunState:
+def new_state(task: str, pattern: str, entry: str, executor: str, reviewers: list[str],
+              run_start_commit: str | None = None) -> RunState:
     return RunState(
         run_id=uuid.uuid4().hex[:12],
         task=task,
@@ -18,7 +19,8 @@ def new_state(task: str, pattern: str, entry: str, executor: str, reviewers: lis
         stage=entry,
         executor=executor,
         reviewers=reviewers,
-        history=[{"at": now_iso(), "event": "run_created", "stage": entry}],
+        run_start_commit=run_start_commit,
+        history=[{"at": now_iso(), "event": "run_created", "stage": entry, "run_start_commit": run_start_commit}],
     )
 
 
