@@ -9,10 +9,16 @@ jobs:
       matrix:
         python: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
-      - run: python -m pip install -e .
+      - run: python -m pip install -e . 'jsonschema>=4.23'
+      # Agentic Dev contracts AgentFlow consumes. Pinned until agentic-dev 0.16.0 is on PyPI.
+      - run: python -m pip install 'agentic-dev @ git+https://github.com/szaher/agentic-dev@725a7a45bcda51ae4c7e43e56522c6c22a7d2a19'
       - run: python -m unittest discover -s tests -v
+        env:
+          AGENTFLOW_REQUIRE_AGENTIC: "1"
       - run: python -m compileall -q src tests

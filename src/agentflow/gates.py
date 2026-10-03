@@ -1,70 +1,93 @@
+"""Deterministic verification gates, executed by Agentic Dev.
+
+AgentFlow decides *what* a gate requires; Agentic Dev discovers and runs the
+commands (``agentic verify run``). A gate is full-project verification:
+
+- a profile names command kinds: ``fast`` = lint + test; ``standard`` and
+  ``strict`` = lint + typecheck + test + build. Every discovered command of
+  each of those kinds runs;
+- explicit ``gates`` in ``.agentflow/config.json`` replace discovery for that
+  profile and still execute through Agentic Dev (no AgentFlow shell fallback);
+- a gate with nothing to run fails: zero checks is never success;
+- change-aware checks (stage metadata ``include_changed``) can only be added on
+  top of the full baseline, using the run-start commit as the base.
+"""
+
 from __future__ import annotations
 
-import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
+from .agentic import Agentic
 from .models import GateResult, ProjectConfig
-from .util import run_command
 
-DEFAULTS = {
-    "fast": [],
-    "standard": [],
-    "strict": [],
+PROFILE_KINDS: dict[str, tuple[str, ...]] = {
+    "fast": ("lint", "test"),
+    "standard": ("lint", "typecheck", "test", "build"),
+    "strict": ("lint", "typecheck", "test", "build"),
 }
 
 
-def detected_commands(root: Path, profile: str = "standard") -> list[tuple[str, str]]:
-    cmds: list[tuple[str, str]] = []
-    # Python
-    if (root / "pyproject.toml").exists() or (root / "setup.py").exists():
-        if (root / "pyproject.toml").exists():
-            text = (root / "pyproject.toml").read_text(encoding="utf-8", errors="ignore")
-        else:
-            text = ""
-        if "pytest" in text or (root / "tests").exists():
-            cmds.append(("pytest", "python -m pytest -q"))
-        if "ruff" in text:
-            cmds.insert(0, ("ruff", "python -m ruff check ."))
-        if "mypy" in text and profile != "fast":
-            cmds.append(("mypy", "python -m mypy ."))
-    # Node
-    if (root / "package.json").exists():
-        import json
-        try:
-            pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
-            scripts = pkg.get("scripts", {})
-            runner = "npm"
-            if (root / "pnpm-lock.yaml").exists(): runner = "pnpm"
-            elif (root / "yarn.lock").exists(): runner = "yarn"
-            for name in ["lint", "typecheck", "test", "build"]:
-                if name in scripts and (profile != "fast" or name in {"lint", "test"}):
-                    cmds.append((name, f"{runner} run {name}"))
-        except Exception:
-            pass
-    if (root / "go.mod").exists():
-        cmds.append(("go-test", "go test ./..."))
-        if profile == "strict": cmds.append(("go-vet", "go vet ./..."))
-    if (root / "Cargo.toml").exists():
-        cmds.append(("cargo-test", "cargo test --quiet"))
-        if profile != "fast": cmds.insert(0, ("cargo-check", "cargo check --quiet"))
-    if (root / "Makefile").exists() and profile == "strict":
-        cmds.append(("make-check", "make check"))
-    return cmds
+@dataclass
+class GatePlan:
+    profile: str
+    kinds: list[str]
+    commands: list[str]
+    include_changed: bool = False
+    base: str | None = None
 
 
-def commands_for(root: Path, config: ProjectConfig, profile: str) -> list[tuple[str, str]]:
+@dataclass
+class GateRun:
+    status: str  # passed | failed | no-checks
+    results: list[GateResult]
+    plan: GatePlan
+    reason: str
+    verification: dict[str, Any] | None = field(default=None, repr=False)
+
+    @property
+    def passed(self) -> bool:
+        return self.status == "passed"
+
+
+def plan_gate(root: Path, config: ProjectConfig, profile: str, *, agentic: Agentic,
+              include_changed: bool = False, base: str | None = None) -> GatePlan:
+    if profile not in PROFILE_KINDS:
+        raise ValueError(f"unknown gate profile {profile!r}; choose one of: {', '.join(PROFILE_KINDS)}")
     custom = config.gates.get(profile)
     if custom:
-        return [(f"custom-{i+1}", cmd) for i, cmd in enumerate(custom)]
-    return detected_commands(root, profile)
+        return GatePlan(profile, [], list(custom), include_changed, base)
+    available = agentic.discovered_kinds(root)
+    kinds = [kind for kind in PROFILE_KINDS[profile] if kind in available]
+    return GatePlan(profile, kinds, [], include_changed, base)
 
 
-def run_gates(root: Path, config: ProjectConfig, profile: str) -> list[GateResult]:
-    results: list[GateResult] = []
-    for name, command in commands_for(root, config, profile):
-        start = time.monotonic()
-        cp = run_command(command, root)
-        results.append(GateResult(name, command, cp.returncode, cp.stdout, cp.stderr, time.monotonic() - start))
-        if cp.returncode != 0:
-            break
-    return results
+def run_gates(root: Path, config: ProjectConfig, profile: str, *, agentic: Agentic | None = None,
+              include_changed: bool = False, base: str | None = None) -> GateRun:
+    agentic = agentic or Agentic()
+    plan = plan_gate(root, config, profile, agentic=agentic, include_changed=include_changed, base=base)
+    if not plan.kinds and not plan.commands:
+        wanted = ", ".join(PROFILE_KINDS[profile])
+        return GateRun("no-checks", [], plan,
+                       f"no {wanted} commands were discovered; configure .agentflow/config.json -> gates.{profile}")
+    document = agentic.verify(root, kinds=plan.kinds, commands=plan.commands,
+                              include_changed=plan.include_changed, base=plan.base)
+    results = [
+        GateResult(
+            name=item.get("kind", "check"),
+            command=item.get("command") or item.get("test_file") or item.get("capability") or "",
+            returncode=item.get("returncode") if item.get("returncode") is not None else (0 if item.get("success") else 1),
+            stdout=item.get("stdout", ""),
+            stderr=item.get("stderr", "") or item.get("error", ""),
+            duration_s=float(item.get("duration_ms", 0.0)) / 1000,
+        )
+        for item in document.get("results", [])
+        if item.get("executed")
+    ]
+    status = document["status"]
+    if document.get("missing_kinds"):
+        reason = f"no runnable command for: {', '.join(document['missing_kinds'])}"
+    else:
+        reason = {"passed": "gates passed", "failed": "gates failed", "no-checks": "no checks were executed"}[status]
+    return GateRun(status, results, plan, reason, document)

@@ -79,6 +79,7 @@ class RunState:
     executor: str = "claude"
     reviewers: list[str] = field(default_factory=list)
     fingerprint: str | None = None
+    base_commit: str | None = None
     plan_hash: str | None = None
     awaiting_reason: str | None = None
     history: list[dict[str, Any]] = field(default_factory=list)

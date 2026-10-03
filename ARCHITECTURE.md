@@ -50,7 +50,11 @@ Patterns express policy semantically ("independent read-only review", "strict de
 
 ## Evidence rule
 
-No state transition that claims verification should depend solely on an agent's prose assertion. Deterministic gates are executed directly by Agentflow. Review output is stored and bound to a repository fingerprint.
+No state transition that claims verification should depend solely on an agent's prose assertion. Deterministic gates are executed by Agentic Dev (`agentic verify run`) on AgentFlow's behalf; AgentFlow decides which kinds are required and what the result means, and only an explicit `passed` status passes a gate. Review output is stored and bound to a repository fingerprint.
+
+## Agentic Dev boundary
+
+Agentic Dev owns repository/environment facts and verification mechanics; AgentFlow owns workflow meaning, required gates, approvals, retries, evidence, and lifecycle. AgentFlow reaches Agentic Dev only through `agentflow/agentic.py`, which runs the `agentic` CLI, checks the `agentic contracts` handshake, and reads documented JSON contracts. There are no Python imports across the projects and no fallback detection in AgentFlow.
 
 ## Extensibility
 

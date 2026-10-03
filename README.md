@@ -8,20 +8,20 @@ It does not replace Claude Code, Codex, Pi, OpenCode, or another coding agent. T
 
 ## What is included
 
-- Installable Python 3.11+ CLI with no runtime Python dependencies.
+- Installable Python 3.11+ CLI with no Python imports of other projects. It requires the [Agentic Dev](https://github.com/szaher/agentic-dev) `agentic` CLI for repository facts and verification.
 - First-class adapters for **Claude Code**, **Codex**, **Pi**, and **OpenCode**.
 - Generic command adapter for any other non-interactive coding-agent CLI.
 - 21 built-in Agentic SDLC patterns.
 - Repository-local durable run state and evidence.
 - Git-diff fingerprints so verification evidence is tied to the code it verified.
-- Automatic deterministic gate detection for Python, Node/TypeScript, Go, Rust, and Make projects.
-- Configurable custom gates for any stack.
+- Deterministic gates discovered and executed by Agentic Dev (`agentic verify run`) for any stack Agentic Dev supports.
+- Configurable custom gates for any stack, also executed by Agentic Dev.
 - Independent read-only review with post-run worktree mutation detection.
 - Risk-sensitive human approval support.
 - Cross-harness review: e.g. Claude implements, Codex and Pi review.
 - Generated `AGENTS.md`, `CLAUDE.md`, and Agent Skills for compatible harnesses.
 - OpenCode read-only reviewer configuration.
-- Unit/integration tests using only the Python standard library.
+- Unit tests using only the Python standard library, plus contract tests against the installed `agentic` CLI (jsonschema, test-only).
 
 ## Install
 
@@ -181,7 +181,17 @@ Agentflow intentionally uses a coarse adapter boundary. It does not reimplement 
 
 ## Deterministic verification
 
-`agentflow verify` auto-detects common project checks. You can override each profile in `.agentflow/config.json`:
+AgentFlow decides **what a gate requires**; [Agentic Dev](https://github.com/szaher/agentic-dev) **discovers and runs the commands**. The `agentic` CLI is a hard prerequisite: AgentFlow talks to it only through process + JSON contracts, checks `agentic contracts --json` for the contracts and features it needs (never the version), and has no fallback of its own. If `agentic` is missing or incompatible, `agentflow doctor` and `agentflow verify` say so and a gate stage **blocks** the run instead of retrying the implementation. Set `AGENTFLOW_AGENTIC` to use a specific binary.
+
+A gate is full-project verification of the profile's command kinds, running **every** command Agentic Dev discovers for each:
+
+| Profile | Kinds |
+|---|---|
+| `fast` | lint, test |
+| `standard` | lint, typecheck, test, build |
+| `strict` | lint, typecheck, test, build |
+
+You can override each profile in `.agentflow/config.json`; explicit commands replace discovery for that profile and still execute through Agentic Dev:
 
 ```json
 {
@@ -193,7 +203,9 @@ Agentflow intentionally uses a coarse adapter boundary. It does not reimplement 
 }
 ```
 
-A gate stage with zero detected/configured checks **fails closed**; Agentflow never treats “nothing ran” as verification.
+A gate stage with zero discovered/configured checks **fails closed** (`no-checks`); AgentFlow never treats “nothing ran” as verification.
+
+Each run records the commit it started from. A gate stage can opt in to change-aware checks with `"metadata": {"include_changed": true}`: Agentic Dev then adds checks selected from changes since the run's start commit. It can only add checks on top of the full baseline, never remove one. Gate evidence records Agentic Dev's verification status, the planned kinds/commands, and any missing kinds.
 
 ## Evidence freshness
 

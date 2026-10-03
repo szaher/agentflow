@@ -17,6 +17,9 @@ classifiers = [
   "License :: OSI Approved :: Apache Software License",
 ]
 
+[project.optional-dependencies]
+test = ["jsonschema>=4.23"]
+
 [project.scripts]
 agentflow = "agentflow.cli:main"
 

@@ -1,3 +1,4 @@
+import json
 import subprocess
 import tempfile
 import unittest
@@ -9,7 +10,12 @@ from agentflow.config import load_project
 from agentflow.engine import Engine
 from agentflow.models import HarnessResult, ProjectConfig
 from agentflow.patterns import load_pattern
-from agentflow.state import new_state, save_state
+from agentflow.git import head_commit
+from agentflow.state import load_state, new_state, save_state
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fakes import FakeAgentic  # noqa: E402
 
 class FakeHarness:
     name="fake"
@@ -46,8 +52,10 @@ class EngineTests(unittest.TestCase):
             p=load_pattern("fast",root)
             st=new_state("change",p.name,p.entry,"claude",["codex"]); save_state(root,st)
             with patch("agentflow.engine.get_harness", return_value=FakeHarness()):
-                status=Engine(load_project(root),st).run()
+                fake_agentic=FakeAgentic()
+                status=Engine(load_project(root),st,agentic=fake_agentic).run()
             self.assertEqual(status,"complete")
+            self.assertEqual(fake_agentic.calls[0]["commands"],["python -c 'print(1)'"])
             self.assertTrue((root/"work.txt").exists())
         finally: td.cleanup()
 
@@ -60,6 +68,6 @@ class EngineTests(unittest.TestCase):
             st=new_state("change",p.name,p.entry,"claude",["codex"]); save_state(root,st)
             fake=MutatingReviewer()
             with patch("agentflow.engine.get_harness", return_value=fake):
-                status=Engine(load_project(root),st).run(max_steps=20)
+                status=Engine(load_project(root),st,agentic=FakeAgentic()).run(max_steps=20)
             self.assertEqual(status,"blocked")
         finally: td.cleanup()

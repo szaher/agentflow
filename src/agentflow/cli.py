@@ -11,8 +11,9 @@ from . import __version__
 from .bootstrap import init_project
 from .config import load_project, save_config
 from .engine import Engine, EngineError
-from .gates import commands_for, run_gates
-from .git import implementation_fingerprint
+from .agentic import Agentic, AgenticError
+from .gates import plan_gate, run_gates
+from .git import head_commit, implementation_fingerprint
 from .harnesses import detected as detect_harnesses, names as harness_names
 from .models import ProjectConfig
 from .patterns import list_patterns, load_pattern
@@ -54,11 +55,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for name, ok in statuses.items(): print(f"{'✓' if ok else '○'} harness {name}")
     pattern = load_pattern(project.config.pattern, project.root)
     print(f"✓ pattern valid: {pattern.name} ({len(pattern.stages)} stages)")
-    cmds = commands_for(project.root, project.config, project.config.gate_profile)
-    if cmds:
-        for name, cmd in cmds: print(f"✓ gate {name}: {cmd}")
+    try:
+        gp = plan_gate(project.root, project.config, project.config.gate_profile, agentic=Agentic())
+    except AgenticError as exc:
+        print(f"✗ agentic-dev: {exc}"); return 2
+    if gp.kinds or gp.commands:
+        print(f"✓ gates ({gp.profile}) via agentic-dev: " + ", ".join(gp.kinds or gp.commands))
     else:
-        print("! no deterministic gates detected; configure .agentflow/config.json -> gates")
+        print("! no deterministic gates discovered; configure .agentflow/config.json -> gates")
     return 0 if statuses.get(project.config.executor, False) else 2
 
 
@@ -80,7 +84,7 @@ def _make_state(task: str, pattern_name: str | None, agent: str | None, reviewer
     pattern = load_pattern(pattern_name, project.root)
     executor = agent or project.config.executor
     revs = [x for x in reviewers.split(",") if x] if reviewers is not None else project.config.reviewers
-    state = new_state(task, pattern.name, pattern.entry, executor, revs)
+    state = new_state(task, pattern.name, pattern.entry, executor, revs, base_commit=head_commit(project.root))
     save_state(project.root, state)
     return project, state
 
@@ -119,17 +123,19 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    project = load_project(); state = load_state(project.root)
+    project = load_project(); load_state(project.root)
     profile = args.profile or project.config.gate_profile
-    results = run_gates(project.root, project.config, profile)
-    if not results:
-        print("No gates detected/configured.", file=sys.stderr); return 2
-    for r in results:
-        print(f"{'PASS' if r.passed else 'FAIL'} {r.name}: {r.command} ({r.duration_s:.2f}s)")
-        if not r.passed:
+    try:
+        gate = run_gates(project.root, project.config, profile)
+    except AgenticError as exc:
+        print(f"agentflow: {exc}", file=sys.stderr); return 2
+    for r in gate.results:
+        print(f"{'PASS' if r.returncode == 0 else 'FAIL'} {r.name}: {r.command} ({r.duration_s:.2f}s)")
+        if r.returncode != 0:
             if r.stdout: print(r.stdout[-4000:])
             if r.stderr: print(r.stderr[-4000:], file=sys.stderr)
-    return 0 if all(r.passed for r in results) else 1
+    print(f"verification: {gate.status} ({gate.reason})")
+    return 0 if gate.passed else 1
 
 
 def cmd_approve(args: argparse.Namespace) -> int:
