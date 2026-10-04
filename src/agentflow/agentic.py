@@ -265,7 +265,7 @@ class Agentic:
         expected = 0 if document.get("status") == "ready" else 1
         if code != expected:
             raise AgenticError(
-                f"\`agentic session plan\` status {document.get('status')!r} disagrees with exit {code}"
+                f"`agentic session plan` status {document.get('status')!r} disagrees with exit {code}"
             )
         return document
 
