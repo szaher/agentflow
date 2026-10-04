@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentflow.agentic import Agentic
+from agentflow.agentic import Agentic, AgenticError
 from agentflow.gates import run_gates
 from agentflow.models import ProjectConfig
 
@@ -61,6 +61,43 @@ class AgenticContractTests(unittest.TestCase):
     def test_handshake(self):
         document = self.agentic.handshake()
         jsonschema.validate(document, self.schema("contracts"))
+
+    def test_session_plan_contract_is_consumed_fail_closed(self):
+        root = self.repo({"README.md": "# session\n", "app.py": "print(1)\n"})
+        request = {
+            "schema_version": "1",
+            "document_type": "agentic.session-request",
+            "task": "Fix the app",
+            "invocations": [
+                {"id": "implement", "role": "implementer", "harness": "codex"}
+            ],
+        }
+        before = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        plan = self.agentic.plan_session(root, request)
+        jsonschema.validate(request, self.schema("session-request"))
+        jsonschema.validate(plan, self.schema("session-plan"))
+        self.assertEqual(plan["status"], "blocked")
+        self.assertEqual(plan["request"]["task"], "Fix the app")
+        self.assertTrue(plan["plan_digest"])
+        self.assertTrue(
+            any(item["code"] == "permission-unenforceable" for item in plan["blockers"])
+        )
+        self.assertEqual(
+            subprocess.run(
+                ["git", "-C", str(root), "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout,
+            before,
+        )
+        with self.assertRaises(AgenticError):
+            self.agentic.prepare_session(root, plan)
 
     def test_a_missing_required_kind_fails_and_executes_nothing(self):
         # `fast` requires lint + test; the repo only has `make check` (test). Discovery must not weaken that.
