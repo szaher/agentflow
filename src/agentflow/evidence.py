@@ -35,6 +35,14 @@ def write_precondition_evidence(root: Path, state: RunState, name: str, document
     return path
 
 
+def write_session_evidence(root: Path, state: RunState, document: dict) -> Path:
+    """Persist Agentic Dev's unmodified session-record@1 under this run's evidence."""
+
+    path = root / ".agentflow" / "evidence" / state.run_id / "session-record.json"
+    atomic_json(path, document)
+    return path
+
+
 def write_review_evidence(root: Path, state: RunState, harness: str, index: int, stdout: str, stderr: str, fingerprint: str, passed: bool) -> Path:
     data = {"run_id": state.run_id, "stage": state.stage, "at": now_iso(), "harness": harness,
             "fingerprint": fingerprint, "passed": passed, "stdout": stdout, "stderr": stderr}

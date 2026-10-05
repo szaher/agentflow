@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -15,7 +14,7 @@ from . import provider
 from .agentic import Agentic, AgenticError, AgenticUnavailable
 from .gates import plan_gate, run_gates
 from .git import head_commit, implementation_fingerprint
-from .harnesses import detected as detect_harnesses, names as harness_names
+from .harnesses import detected as detect_harnesses
 from .models import ProjectConfig
 from .patterns import list_patterns, load_pattern
 from .requirements import requirements
@@ -156,7 +155,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"Run {state.run_id}: pattern={state.pattern}, executor={state.executor}, reviewers={','.join(state.reviewers) or '(executor)'}")
     _print_session_plan(plan)
     if args.dry_run:
-        print(f"Entry stage: {state.stage}")
+        print(f"Workflow: {engine.pattern.name} | entry={state.stage}")
+        for stage in engine.pattern.stages:
+            print(f"  {stage.id}: {stage.kind} | success={stage.on_success or 'done'} | failure={stage.on_failure or 'blocked'}")
         for line in engine.requirements.describe(): print(f"Requires {line}")
         print("Dry run: nothing was saved or created.")
         return 0 if plan["status"] == "ready" else 2
@@ -182,7 +183,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     record(state, "session_approved", plan_digest=state.approved_plan_digest, method=method)
     save_state(project.root, state)
     print(f"Approved session plan {state.approved_plan_digest} for run {state.run_id}.")
-    return 0
+    return _run_after_session_approval(engine, args)
 
 
 def _session_approval(digest: str, *, yes: bool) -> str | None:

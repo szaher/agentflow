@@ -20,7 +20,8 @@ class FakeAgentic:
     def __init__(self, kinds=("lint", "test"), status="passed", missing=(), unavailable=None,
                  bundled_digest="a" * 64, installed=None, block_status="created", skills_status="ok",
                  tools=("claude", "codex"), readiness_passed=True, capability_state=None, worktree_root=None,
-                 clean_error=None, metrics_error=None, session_status="ready", session_digest="d" * 64):
+                 clean_error=None, metrics_error=None, session_status="ready", session_digest="d" * 64,
+                 prepare_error=None):
         self.kinds = set(kinds)
         self.status = status
         self.missing = list(missing)
@@ -48,6 +49,7 @@ class FakeAgentic:
         self.session_digest = session_digest
         self.session_calls: list[tuple] = []
         self.session_plan_override: dict | None = None
+        self.prepare_error = prepare_error
 
     def plan_session(self, root, request):
         self.session_calls.append(("plan", str(root), request))
@@ -70,6 +72,9 @@ class FakeAgentic:
 
     def prepare_session(self, workspace, plan):
         self.session_calls.append(("prepare", str(workspace), plan["plan_digest"]))
+        if self.prepare_error:
+            from agentflow.agentic import AgenticError
+            raise AgenticError(self.prepare_error)
         return {"schema_version": "1", "document_type": "agentic.session-record",
                 "status": "prepared", "workspace": str(workspace), "plan_digest": plan["plan_digest"],
                 "invocations": plan["invocations"]}

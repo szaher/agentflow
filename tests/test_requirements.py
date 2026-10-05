@@ -392,8 +392,10 @@ class RunRequirementTests(unittest.TestCase):
         try:
             run_ids = []
             for task in ("first", "second"):
-                with patch("agentflow.cli.Agentic", return_value=fake), contextlib.redirect_stdout(io.StringIO()):
-                    self.assertEqual(cli.main(["run", task, "--pattern", "custom", "--yes"]), 0)
+                with (patch("agentflow.cli.Agentic", return_value=fake),
+                      patch("agentflow.cli.Engine.start", return_value="blocked"),
+                      contextlib.redirect_stdout(io.StringIO())):
+                    self.assertEqual(cli.main(["run", task, "--pattern", "custom", "--yes"]), 2)
                 state = load_state(self.root)
                 run_ids.append(state.run_id)
                 self.assertEqual(state.approved_plan_digest, fake.session_digest)
@@ -433,6 +435,223 @@ class RunRequirementTests(unittest.TestCase):
             self.assertEqual(fake.requirement_calls, [])
         finally:
             os.chdir(old)
+
+    def test_approved_session_prepares_worktree_and_records_evidence_before_stage(self):
+        import contextlib
+        import io
+        import os
+        from agentflow import cli
+
+        self.use(isolation={"mode": "worktree"})
+        fake = FakeAgentic(worktree_root=self.tmp / "trees")
+        harness = FakeHarness()
+        old = os.getcwd()
+        os.chdir(self.root)
+        try:
+            with (patch("agentflow.cli.Agentic", return_value=fake),
+                  patch("agentflow.engine.get_harness", return_value=harness),
+                  contextlib.redirect_stdout(io.StringIO())):
+                self.assertEqual(cli.main(["run", "change", "--pattern", "custom", "--yes"]), 2)
+            state = load_state(self.root)
+            self.assertTrue(state.started)
+            self.assertEqual(state.status, "blocked")  # no real adapter has a verified launch recipe
+            self.assertIsNotNone(state.worktree)
+            self.assertEqual(state.session_record["plan_digest"], state.approved_plan_digest)
+            evidence = next(item for item in state.evidence if item["kind"] == "session")
+            self.assertEqual(json.loads((self.root / evidence["path"]).read_text()), state.session_record)
+            self.assertEqual(harness.seen, [])
+            events = [item["event"] for item in state.history]
+            self.assertLess(events.index("session_approved"), events.index("worktree_created"))
+            self.assertLess(events.index("worktree_created"), events.index("session_prepared"))
+            self.assertLess(events.index("session_prepared"), events.index("blocked"))
+            self.assertEqual([call[0] for call in fake.session_calls],
+                             ["plan", "plan", "plan", "prepare", "plan"])
+        finally:
+            os.chdir(old)
+
+    def test_scripted_verified_harness_receives_bounds_only_after_preparation(self):
+        import contextlib
+        import io
+        import os
+        from agentflow import cli
+
+        class ScriptedHarness(FakeHarness):
+            session_launch_verified = True
+
+            def execute_session(self, root, prompt, *, permissions, read_only=False, extra=None, env=None):
+                self.permissions = permissions
+                return self.execute(root, prompt, read_only=read_only, extra=extra, env=env)
+
+        self.use(isolation={"mode": "worktree"})
+        fake = FakeAgentic(worktree_root=self.tmp / "trees")
+        harness = ScriptedHarness()
+        old = os.getcwd()
+        os.chdir(self.root)
+        try:
+            with (patch("agentflow.cli.Agentic", return_value=fake),
+                  patch("agentflow.engine.get_harness", return_value=harness),
+                  contextlib.redirect_stdout(io.StringIO())):
+                self.assertEqual(cli.main(["run", "change", "--pattern", "custom", "--yes"]), 0)
+            state = load_state(self.root)
+            self.assertEqual(state.status, "complete")
+            self.assertEqual(harness.permissions["filesystem"]["enforceable"], "enforceable")
+            self.assertEqual(harness.permissions["filesystem"]["effective"]["level"], "workspace-write")
+            self.assertEqual(len(harness.seen), 1)
+            events = [item["event"] for item in state.history]
+            self.assertLess(events.index("session_prepared"), events.index("agent_result"))
+            self.assertFalse((self.root / "work.txt").exists())
+            self.assertTrue((Path(state.worktree["path"]) / "work.txt").exists())
+        finally:
+            os.chdir(old)
+
+    def test_preparation_error_stops_before_any_stage(self):
+        import contextlib
+        import io
+        import os
+        from agentflow import cli
+
+        self.use(isolation={"mode": "worktree"})
+        fake = FakeAgentic(prepare_error="SESSION_WORKSPACE_DIRTY: unapproved source")
+        harness = FakeHarness()
+        old = os.getcwd()
+        os.chdir(self.root)
+        try:
+            with (patch("agentflow.cli.Agentic", return_value=fake),
+                  patch("agentflow.engine.get_harness", return_value=harness),
+                  contextlib.redirect_stdout(io.StringIO())):
+                self.assertEqual(cli.main(["run", "change", "--pattern", "custom", "--yes"]), 2)
+            state = load_state(self.root)
+            self.assertEqual(state.status, "blocked")
+            self.assertIn("SESSION_WORKSPACE_DIRTY", state.awaiting_reason)
+            self.assertFalse(state.started)
+            self.assertIsNone(state.session_record)
+            self.assertEqual(harness.seen, [])
+        finally:
+            os.chdir(old)
+
+    def test_stale_preparation_error_stops_before_any_stage(self):
+        import contextlib
+        import io
+        import os
+        from agentflow import cli
+
+        self.use(isolation={"mode": "worktree"})
+        fake = FakeAgentic(prepare_error="SESSION_PLAN_STALE: inputs changed")
+        harness = FakeHarness()
+        old = os.getcwd()
+        os.chdir(self.root)
+        try:
+            with (patch("agentflow.cli.Agentic", return_value=fake),
+                  patch("agentflow.engine.get_harness", return_value=harness),
+                  contextlib.redirect_stdout(io.StringIO())):
+                self.assertEqual(cli.main(["run", "change", "--pattern", "custom", "--yes"]), 2)
+            state = load_state(self.root)
+            self.assertEqual(state.status, "blocked")
+            self.assertIn("SESSION_PLAN_STALE", state.awaiting_reason)
+            self.assertFalse(state.started)
+            self.assertIsNone(state.session_record)
+            self.assertEqual(harness.seen, [])
+        finally:
+            os.chdir(old)
+
+    def test_unknown_prepared_permissions_stop_before_every_stage(self):
+        import contextlib
+        import io
+        import os
+        from agentflow import cli
+
+        self.use(isolation={"mode": "worktree"})
+        fake = FakeAgentic()
+        original = fake.prepare_session
+        def unresolved(workspace, plan):
+            document = original(workspace, plan)
+            document["invocations"][0]["permissions"]["network"]["enforceable"] = "unknown"
+            return document
+        fake.prepare_session = unresolved
+        harness = FakeHarness()
+        old = os.getcwd()
+        os.chdir(self.root)
+        try:
+            with (patch("agentflow.cli.Agentic", return_value=fake),
+                  patch("agentflow.engine.get_harness", return_value=harness),
+                  contextlib.redirect_stdout(io.StringIO())):
+                self.assertEqual(cli.main(["run", "change", "--pattern", "custom", "--yes"]), 2)
+            state = load_state(self.root)
+            self.assertEqual(state.status, "blocked")
+            self.assertIn("enforcement is unknown", state.awaiting_reason)
+            self.assertFalse(state.started)
+            self.assertEqual(harness.seen, [])
+        finally:
+            os.chdir(old)
+
+    def test_resumed_approval_rechecks_digest_before_worktree_creation(self):
+        from agentflow.session import build_session_request
+
+        self.use(isolation={"mode": "worktree"})
+        project = load_project(self.root)
+        pattern = load_pattern("custom", self.root)
+        state = self.new_run(executor="codex")
+        fake = FakeAgentic()
+        request = build_session_request(project, pattern, state.task, state.executor, state.reviewers)
+        plan = fake.plan_session(self.root, request)
+        state.session_request = request
+        state.session_plan = plan
+        state.approved_plan_digest = plan["plan_digest"]
+        save_state(self.root, state)
+        fake.session_digest = "e" * 64
+        self.assertEqual(Engine(project, state, agentic=fake).start(), "blocked")
+        self.assertIn("plan changed after approval", state.awaiting_reason)
+        self.assertIsNone(state.worktree)
+        self.assertFalse(any(call[0] == "worktree-create" for call in fake.requirement_calls))
+
+    def test_resumed_approved_run_reuses_worktree_and_still_calls_prepare(self):
+        from agentflow.session import build_session_request
+
+        self.use(isolation={"mode": "worktree"})
+        project = load_project(self.root)
+        pattern = load_pattern("custom", self.root)
+        state = self.new_run(executor="codex")
+        fake = FakeAgentic(worktree_root=self.tmp / "trees")
+        request = build_session_request(project, pattern, state.task, state.executor, state.reviewers)
+        plan = fake.plan_session(self.root, request)
+        state.session_request = request
+        state.session_plan = plan
+        state.approved_plan_digest = plan["plan_digest"]
+        name = f"agentflow-{state.run_id}"
+        branch = f"agentflow/{state.run_id}"
+        tree = fake.create_worktree(self.root, name=name, branch=branch,
+                                    base=state.run_start_commit, agent="codex", task=state.task)
+        state.worktree = {"name": name, "path": tree["worktree"], "branch": branch,
+                          "base": state.run_start_commit, "cleaned": False}
+        save_state(self.root, state)
+        self.assertEqual(Engine(project, state, agentic=fake).start(), "running")
+        self.assertTrue(state.started)
+        self.assertEqual([call[0] for call in fake.session_calls], ["plan", "plan", "prepare"])
+        self.assertEqual([call[0] for call in fake.requirement_calls], ["worktree-create", "worktree-status"])
+        self.assertEqual(state.session_record["plan_digest"], state.approved_plan_digest)
+
+    def test_started_session_rechecks_digest_before_resumed_stage(self):
+        from agentflow.session import build_session_request
+
+        self.use(isolation={"mode": "worktree"})
+        project = load_project(self.root)
+        pattern = load_pattern("custom", self.root)
+        state = self.new_run(executor="codex")
+        fake = FakeAgentic(worktree_root=self.tmp / "trees")
+        request = build_session_request(project, pattern, state.task, state.executor, state.reviewers)
+        plan = fake.plan_session(self.root, request)
+        state.session_request = request
+        state.session_plan = plan
+        state.approved_plan_digest = plan["plan_digest"]
+        save_state(self.root, state)
+        self.assertEqual(Engine(project, state, agentic=fake).start(), "running")
+        self.assertTrue(state.started)
+        fake.session_digest = "f" * 64
+        harness = FakeHarness()
+        with patch("agentflow.engine.get_harness", return_value=harness):
+            self.assertEqual(Engine(project, load_state(self.root), agentic=fake).step(), "blocked")
+        self.assertEqual(harness.seen, [])
+        self.assertIn("plan changed after approval", load_state(self.root).awaiting_reason)
 
     # -- control-root bridge -------------------------------------------------------------------
 

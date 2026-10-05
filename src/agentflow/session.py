@@ -43,7 +43,9 @@ def build_session_request(
         candidates = reviewers or project.config.reviewers or [executor]
         count = max(stage.reviewers or len(candidates) or 1 for stage in review_stages)
         invocations += [
-            invocation(f"review-{index}", "reviewer", candidates[(index - 1) % len(candidates)])
+            invocation(
+                f"review-{index}", "reviewer", candidates[(index - 1) % len(candidates)]
+            )
             for index in range(1, count + 1)
         ]
 
@@ -52,7 +54,9 @@ def build_session_request(
         if stage.kind == "gate":
             profile = stage.gate_profile or project.config.gate_profile
             verification.update(
-                plan_gate(project.root, project.config, profile, minimum=reqs.minimum).kinds
+                plan_gate(
+                    project.root, project.config, profile, minimum=reqs.minimum
+                ).kinds
             )
 
     request: dict[str, Any] = {
