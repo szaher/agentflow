@@ -379,6 +379,61 @@ class RunRequirementTests(unittest.TestCase):
         finally:
             os.chdir(old)
 
+    def test_explicit_session_approval_is_per_run_and_precedes_worktree(self):
+        import contextlib
+        import io
+        import os
+        from agentflow import cli
+
+        self.use(isolation={"mode": "worktree"})
+        fake = FakeAgentic()
+        old = os.getcwd()
+        os.chdir(self.root)
+        try:
+            run_ids = []
+            for task in ("first", "second"):
+                with patch("agentflow.cli.Agentic", return_value=fake), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(cli.main(["run", task, "--pattern", "custom", "--yes"]), 0)
+                state = load_state(self.root)
+                run_ids.append(state.run_id)
+                self.assertEqual(state.approved_plan_digest, fake.session_digest)
+                self.assertEqual(state.session_plan["plan_digest"], fake.session_digest)
+                self.assertEqual([event["event"] for event in state.history].count("session_approved"), 1)
+                self.assertFalse(state.started)
+                self.assertIsNone(state.worktree)
+            self.assertNotEqual(*run_ids)
+            self.assertEqual([call[0] for call in fake.session_calls], ["plan"] * 4)
+            self.assertEqual(fake.requirement_calls, [])
+        finally:
+            os.chdir(old)
+
+    def test_plan_changed_before_interactive_approval_is_not_persisted(self):
+        import contextlib
+        import io
+        import os
+        from agentflow import cli
+
+        self.use(isolation={"mode": "worktree"})
+        fake = FakeAgentic()
+        old = os.getcwd()
+        os.chdir(self.root)
+        def confirm(prompt):
+            self.assertIn(fake.session_digest, prompt)
+            fake.session_digest = "e" * 64
+            return "yes"
+        try:
+            with (patch("agentflow.cli.Agentic", return_value=fake),
+                  patch("agentflow.cli.sys.stdin") as stdin,
+                  patch("builtins.input", side_effect=confirm),
+                  contextlib.redirect_stdout(io.StringIO()) as out):
+                stdin.isatty.return_value = True
+                self.assertEqual(cli.main(["run", "changed", "--pattern", "custom"]), 2)
+            self.assertIn("plan changed", out.getvalue().lower())
+            self.assertFalse((self.root / ".agentflow" / "state.json").exists())
+            self.assertEqual(fake.requirement_calls, [])
+        finally:
+            os.chdir(old)
+
     # -- control-root bridge -------------------------------------------------------------------
 
     def test_isolated_harnesses_get_the_control_root_and_absolute_evidence_paths(self):

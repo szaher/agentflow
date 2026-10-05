@@ -163,8 +163,39 @@ def cmd_run(args: argparse.Namespace) -> int:
     if plan["status"] != "ready":
         print("Session blocked; no run state, worktree, or stage was created.")
         return 2
-    print("Session approval is required before preparation.")
-    return 2
+    method = _session_approval(plan["plan_digest"], yes=args.yes)
+    if method is None:
+        print("Session not approved; no run state or worktree was created.")
+        return 2
+    try:
+        current = engine.agentic.plan_session(project.root, request)
+    except AgenticError as exc:
+        print(f"agentflow: session revalidation failed: {exc}", file=sys.stderr)
+        return 2
+    if current["status"] != "ready" or current["plan_digest"] != plan["plan_digest"]:
+        print("Session plan changed before approval was recorded; review the new plan and run again.")
+        _print_session_plan(current)
+        return 2
+    state.session_request = request
+    state.session_plan = current
+    state.approved_plan_digest = current["plan_digest"]
+    record(state, "session_approved", plan_digest=state.approved_plan_digest, method=method)
+    save_state(project.root, state)
+    print(f"Approved session plan {state.approved_plan_digest} for run {state.run_id}.")
+    return 0
+
+
+def _session_approval(digest: str, *, yes: bool) -> str | None:
+    if yes:
+        return "--yes"
+    if not sys.stdin.isatty():
+        print("Interactive approval requires a terminal; use --yes to approve this run explicitly.")
+        return None
+    try:
+        answer = input(f"Approve plan_digest {digest} for this run? [y/N] ")
+    except EOFError:
+        return None
+    return "interactive" if answer.strip().lower() in {"y", "yes"} else None
 
 
 def _print_session_plan(plan: dict) -> None:
@@ -278,7 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
     q=sp.add_parser("detect"); q.set_defaults(func=cmd_detect)
     q=sp.add_parser("doctor"); q.set_defaults(func=cmd_doctor)
     q=sp.add_parser("configure"); q.add_argument("--pattern"); q.add_argument("--agent"); q.add_argument("--reviewers"); q.add_argument("--profile", choices=["fast","standard","strict"]); q.set_defaults(func=cmd_configure)
-    q=sp.add_parser("run"); q.add_argument("task"); q.add_argument("--pattern"); q.add_argument("--agent"); q.add_argument("--reviewers"); q.add_argument("--dry-run", action="store_true"); q.add_argument("--max-steps", type=int, default=100); q.set_defaults(func=cmd_run)
+    q=sp.add_parser("run"); q.add_argument("task"); q.add_argument("--pattern"); q.add_argument("--agent"); q.add_argument("--reviewers"); q.add_argument("--dry-run", action="store_true"); q.add_argument("--yes", action="store_true", help="approve this run's exact session plan without a prompt"); q.add_argument("--max-steps", type=int, default=100); q.set_defaults(func=cmd_run)
     q=sp.add_parser("step"); q.set_defaults(func=cmd_step)
     q=sp.add_parser("status"); q.set_defaults(func=cmd_status)
     q=sp.add_parser("verify"); q.add_argument("--profile", choices=["fast","standard","strict"]); q.add_argument("--include-changed", action="store_true", help="add change-aware checks since the run's start commit (never removes any)"); q.set_defaults(func=cmd_verify)

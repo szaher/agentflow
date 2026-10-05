@@ -89,6 +89,11 @@ class RunState:
     # True once run-start preparation (worktree, preconditions) has completed; no stage runs before.
     started: bool = False
     plan_hash: str | None = None
+    # Agentic Dev approval is per run and binds to the semantic session plan, not a stage plan.
+    session_request: dict[str, Any] | None = None
+    session_plan: dict[str, Any] | None = None
+    approved_plan_digest: str | None = None
+    session_record: dict[str, Any] | None = None
     awaiting_reason: str | None = None
     history: list[dict[str, Any]] = field(default_factory=list)
     evidence: list[dict[str, Any]] = field(default_factory=list)

@@ -67,6 +67,8 @@ class Engine:
 
         if self.state.started or self.state.status != "running":
             return self.state.status
+        if self.state.session_plan and self.state.session_record is None:
+            raise EngineError("approved session must be prepared before any stage can run")
         reqs = self.requirements
         if reqs.worktree and not self._ensure_worktree():
             return self.state.status
@@ -128,6 +130,7 @@ class Engine:
                 self._transition("blocked", f"worktree could not be created: {exc}")
                 return False
             event = "worktree_adopted"
+        assert document is not None
         self.state.worktree = {"name": name, "path": document["worktree"], "branch": branch,
                                "base": base, "cleaned": False}
         record(self.state, event, **{k: v for k, v in self.state.worktree.items() if k != "cleaned"})
