@@ -65,7 +65,7 @@ class GateRun:
         return list((self.verification or {}).get("results") or [])
 
 
-def plan_gate(root: Path, config: ProjectConfig, profile: str, *, agentic: Agentic,
+def plan_gate(root: Path, config: ProjectConfig, profile: str, *, agentic: Agentic | None = None,
               include_changed: bool = False, base: str | None = None, minimum: Sequence[str] = ()) -> GatePlan:
     if profile not in PROFILE_KINDS:
         raise ValueError(f"unknown gate profile {profile!r}; choose one of: {', '.join(PROFILE_KINDS)}")

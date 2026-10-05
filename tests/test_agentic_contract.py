@@ -64,14 +64,12 @@ class AgenticContractTests(unittest.TestCase):
 
     def test_session_plan_contract_is_consumed_fail_closed(self):
         root = self.repo({"README.md": "# session\n", "app.py": "print(1)\n"})
-        request = {
-            "schema_version": "1",
-            "document_type": "agentic.session-request",
-            "task": "Fix the app",
-            "invocations": [
-                {"id": "implement", "role": "implementer", "harness": "codex"}
-            ],
-        }
+        from agentflow.models import Project, ProjectConfig
+        from agentflow.patterns import load_pattern
+        from agentflow.session import build_session_request
+
+        project = Project(root, ProjectConfig(pattern="fast", executor="codex", reviewers=[]))
+        request = build_session_request(project, load_pattern("fast", root), "Fix the app", "codex", [])
         before = subprocess.run(
             ["git", "-C", str(root), "status", "--porcelain"],
             capture_output=True,

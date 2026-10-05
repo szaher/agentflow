@@ -28,7 +28,9 @@ from typing import Any
 
 from .models import Pattern
 
-SECTIONS = {"requires": {"readiness", "capabilities"}, "verification": {"minimum"}, "isolation": {"mode", "cleanup"}}
+SECTIONS = {"requires": {"readiness", "capabilities", "skills", "allowed_skills", "trust_profile",
+                          "trust_ceiling", "permissions"},
+            "verification": {"minimum"}, "isolation": {"mode", "cleanup"}}
 ISOLATION_MODES = ("none", "worktree")
 CLEANUP_POLICIES = ("never", "on-success")
 
@@ -37,6 +39,11 @@ CLEANUP_POLICIES = ("never", "on-success")
 class Requirements:
     readiness: str | None = None
     capabilities: tuple[str, ...] = ()
+    skills: tuple[str, ...] = ()
+    allowed_skills: tuple[str, ...] | None = None
+    trust_profile: str | None = None
+    trust_ceiling: str | None = None
+    permissions: dict[str, Any] | None = None
     minimum: tuple[str, ...] = ()
     worktree: bool = False
     cleanup_on_success: bool = False
@@ -47,6 +54,12 @@ class Requirements:
             lines.append(f"readiness: {self.readiness} (local scope, checked at run start)")
         if self.capabilities:
             lines.append(f"capabilities: {', '.join(self.capabilities)}")
+        if self.skills:
+            lines.append(f"skills: {', '.join(self.skills)}")
+        if self.trust_profile:
+            lines.append(f"trust profile: {self.trust_profile}")
+        if self.trust_ceiling:
+            lines.append(f"trust ceiling: {self.trust_ceiling}")
         if self.minimum:
             lines.append(f"verification minimum: {', '.join(self.minimum)}")
         if self.worktree:
@@ -73,6 +86,15 @@ def requirements(pattern: Pattern) -> Requirements:
     readiness = pattern.requires.get("readiness")
     if readiness is not None and (not isinstance(readiness, str) or not readiness.strip()):
         raise ValueError(f"{pattern.name}: requires.readiness must be a level name")
+    for key in ("trust_profile", "trust_ceiling"):
+        value = pattern.requires.get(key)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"{pattern.name}: requires.{key} must be a non-empty name")
+    permissions = pattern.requires.get("permissions")
+    if permissions is not None and (not isinstance(permissions, dict) or
+                                    set(permissions) - {"implementer", "reviewer"} or
+                                    any(not isinstance(value, dict) for value in permissions.values())):
+        raise ValueError(f"{pattern.name}: requires.permissions must map implementer/reviewer to bounds")
     mode = pattern.isolation.get("mode", "none")
     cleanup = pattern.isolation.get("cleanup", "never")
     if mode not in ISOLATION_MODES:
@@ -84,6 +106,12 @@ def requirements(pattern: Pattern) -> Requirements:
     return Requirements(
         readiness=readiness,
         capabilities=_names(pattern.requires.get("capabilities", []), f"{pattern.name}: requires.capabilities"),
+        skills=_names(pattern.requires.get("skills", []), f"{pattern.name}: requires.skills"),
+        allowed_skills=(_names(pattern.requires["allowed_skills"], f"{pattern.name}: requires.allowed_skills")
+                        if "allowed_skills" in pattern.requires else None),
+        trust_profile=pattern.requires.get("trust_profile"),
+        trust_ceiling=pattern.requires.get("trust_ceiling"),
+        permissions=permissions,
         minimum=_names(pattern.verification.get("minimum", []), f"{pattern.name}: verification.minimum"),
         worktree=mode == "worktree",
         cleanup_on_success=cleanup == "on-success",
