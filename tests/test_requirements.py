@@ -342,19 +342,42 @@ class RunRequirementTests(unittest.TestCase):
         cwd = os.getcwd()
         os.chdir(self.root)
         try:
-            with contextlib.redirect_stdout(io.StringIO()) as out:
+            fake = FakeAgentic()
+            with patch("agentflow.cli.Agentic", return_value=fake), contextlib.redirect_stdout(io.StringIO()) as out:
                 self.assertEqual(cli.main(["run", "first", "--pattern", "custom", "--dry-run"]), 0)
             self.assertFalse(state_file.exists())
             self.assertIn("nothing was saved", out.getvalue())
+            self.assertIn(f"plan_digest={fake.session_digest}", out.getvalue())
             self.new_run()
             existing = state_file.read_bytes()
-            with contextlib.redirect_stdout(io.StringIO()):
+            with patch("agentflow.cli.Agentic", return_value=fake), contextlib.redirect_stdout(io.StringIO()):
                 cli.main(["run", "second", "--pattern", "custom", "--dry-run"])
             self.assertEqual(state_file.read_bytes(), existing)
         finally:
             os.chdir(cwd)
         self.assertEqual(len(subprocess.run(["git", "-C", str(self.root), "worktree", "list"], capture_output=True,
                                             text=True, check=True).stdout.splitlines()), 1)
+
+    def test_blocked_session_plan_creates_no_run_or_worktree(self):
+        import contextlib
+        import io
+        import os
+        from agentflow import cli
+
+        self.use(isolation={"mode": "worktree"})
+        fake = FakeAgentic(session_status="blocked")
+        old = os.getcwd()
+        os.chdir(self.root)
+        try:
+            with patch("agentflow.cli.Agentic", return_value=fake), contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(cli.main(["run", "blocked", "--pattern", "custom"]), 2)
+            self.assertIn("permission-unenforceable", out.getvalue())
+            self.assertFalse((self.root / ".agentflow" / "state.json").exists())
+            self.assertEqual(len(subprocess.run(["git", "-C", str(self.root), "worktree", "list"],
+                                                capture_output=True, text=True, check=True).stdout.splitlines()), 1)
+            self.assertEqual([call[0] for call in fake.session_calls], ["plan"])
+        finally:
+            os.chdir(old)
 
     # -- control-root bridge -------------------------------------------------------------------
 

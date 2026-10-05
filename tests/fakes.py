@@ -20,7 +20,7 @@ class FakeAgentic:
     def __init__(self, kinds=("lint", "test"), status="passed", missing=(), unavailable=None,
                  bundled_digest="a" * 64, installed=None, block_status="created", skills_status="ok",
                  tools=("claude", "codex"), readiness_passed=True, capability_state=None, worktree_root=None,
-                 clean_error=None, metrics_error=None):
+                 clean_error=None, metrics_error=None, session_status="ready", session_digest="d" * 64):
         self.kinds = set(kinds)
         self.status = status
         self.missing = list(missing)
@@ -44,6 +44,35 @@ class FakeAgentic:
         self.requirement_calls: list[tuple] = []
         self.worktrees: dict[str, dict] = {}
         self.metrics: list[dict] = []
+        self.session_status = session_status
+        self.session_digest = session_digest
+        self.session_calls: list[tuple] = []
+        self.session_plan_override: dict | None = None
+
+    def plan_session(self, root, request):
+        self.session_calls.append(("plan", str(root), request))
+        if self.session_plan_override is not None:
+            return dict(self.session_plan_override)
+        return {
+            "schema_version": "1", "document_type": "agentic.session-plan",
+            "status": self.session_status, "repository": str(root), "request": request,
+            "plan_digest": self.session_digest, "request_digest": "r" * 64,
+            "inputs_digest": "i" * 64,
+            "invocations": [{"id": item["id"], "role": item["role"],
+                             "harness": item["harness"], "version": "test-1.0",
+                             "permissions": {dimension: {"effective": {"level": bounds["minimum"]},
+                                                        "enforceable": "enforceable" if self.session_status == "ready" else "unknown"}
+                                             for dimension, bounds in item["permissions"].items()}}
+                            for item in request["invocations"]],
+            "blockers": [] if self.session_status == "ready" else
+                        [{"code": "permission-unenforceable", "detail": "test unknown enforcement"}],
+        }
+
+    def prepare_session(self, workspace, plan):
+        self.session_calls.append(("prepare", str(workspace), plan["plan_digest"]))
+        return {"schema_version": "1", "document_type": "agentic.session-record",
+                "status": "prepared", "workspace": str(workspace), "plan_digest": plan["plan_digest"],
+                "invocations": plan["invocations"]}
 
     def handshake(self):
         if self.unavailable:

@@ -19,6 +19,7 @@ from .harnesses import detected as detect_harnesses, names as harness_names
 from .models import ProjectConfig
 from .patterns import list_patterns, load_pattern
 from .requirements import requirements
+from .session import build_session_request
 from .state import load_state, new_state, record, save_state, workspace
 
 
@@ -143,15 +144,42 @@ def _make_state(task: str, pattern_name: str | None, agent: str | None, reviewer
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    # --dry-run is non-mutating: no state, no worktree, nothing else; an existing run is left byte-identical.
-    project, state = _make_state(args.task, args.pattern, args.agent, args.reviewers, save=not args.dry_run)
-    engine = Engine(project, state)
+    # Resolve and display the environment before writing run state or creating a worktree.
+    project, state = _make_state(args.task, args.pattern, args.agent, args.reviewers, save=False)
+    engine = Engine(project, state, agentic=Agentic())
+    try:
+        request = build_session_request(project, engine.pattern, state.task, state.executor, state.reviewers)
+        plan = engine.agentic.plan_session(project.root, request)
+    except (AgenticError, ValueError) as exc:
+        print(f"agentflow: session planning failed: {exc}", file=sys.stderr)
+        return 2
     print(f"Run {state.run_id}: pattern={state.pattern}, executor={state.executor}, reviewers={','.join(state.reviewers) or '(executor)'}")
+    _print_session_plan(plan)
     if args.dry_run:
         print(f"Entry stage: {state.stage}")
         for line in engine.requirements.describe(): print(f"Requires {line}")
         print("Dry run: nothing was saved or created.")
-        return 0
+        return 0 if plan["status"] == "ready" else 2
+    if plan["status"] != "ready":
+        print("Session blocked; no run state, worktree, or stage was created.")
+        return 2
+    print("Session approval is required before preparation.")
+    return 2
+
+
+def _print_session_plan(plan: dict) -> None:
+    print(f"Session plan: {plan['status']} | plan_digest={plan['plan_digest']}")
+    for invocation in plan["invocations"]:
+        permissions = ", ".join(
+            f"{dimension}={detail['effective']['level']} ({detail['enforceable']})"
+            for dimension, detail in invocation["permissions"].items()
+        )
+        print(f"  {invocation['id']}: {invocation['harness']} {invocation['version'] or 'unavailable'}; {permissions}")
+    for blocker in plan["blockers"]:
+        print(f"  BLOCKED {blocker['code']}: {blocker['detail']}")
+
+
+def _run_after_session_approval(engine: Engine, args: argparse.Namespace) -> int:
     try:
         status = engine.start()
         if status == "running":
