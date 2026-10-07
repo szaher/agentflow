@@ -165,17 +165,19 @@ class RunRequirementTests(unittest.TestCase):
         status, state = self.run_pattern(fake)
         self.assertEqual(status, "complete")
         tree = Path(state.worktree["path"])
-        self.assertEqual([call[0] for call in fake.requirement_calls], ["worktree-create", "readiness", "capabilities"])
+        self.assertEqual([call[0] for call in fake.requirement_calls],
+                         ["worktree-create", "worktree-status", "readiness", "capabilities",
+                          "worktree-status", "worktree-status"])
         self.assertEqual(fake.requirement_calls[0][1:], (f"agentflow-{state.run_id}", f"agentflow/{state.run_id}",
                                                          state.run_start_commit))
-        self.assertEqual(fake.requirement_calls[1], ("readiness", str(tree), "foundational"))
+        self.assertEqual(fake.requirement_calls[2], ("readiness", str(tree), "foundational"))
         # The work happened in the worktree; the user's checkout is untouched and still holds state and evidence.
         self.assertTrue((tree / "work.txt").exists())
         self.assertFalse((self.root / "work.txt").exists())
         self.assertTrue((self.root / ".agentflow" / "state.json").exists())
         self.assertTrue(all((self.root / e["path"]).exists() for e in state.evidence))
         self.assertFalse(state.worktree["cleaned"])  # cleanup is opt-in
-        self.assertEqual(fake.requirement_calls[-1][0], "capabilities")
+        self.assertEqual(fake.requirement_calls[3][0], "capabilities")
 
     def test_failed_readiness_blocks_before_any_stage_and_never_remediates(self):
         self.use(requires={"readiness": "structured"}, isolation={"mode": "worktree"})
@@ -270,7 +272,8 @@ class RunRequirementTests(unittest.TestCase):
             Engine(load_project(self.root), load_state(self.root), agentic=fake).step()
         state = load_state(self.root)
         self.assertTrue(state.started)
-        self.assertEqual([c[0] for c in fake.requirement_calls], ["worktree-create", "readiness"])
+        self.assertEqual([c[0] for c in fake.requirement_calls],
+                         ["worktree-create", "worktree-status", "readiness", "worktree-status"])
         self.assertEqual(harness.seen[0]["root"], Path(state.worktree["path"]))
         self.assertFalse((self.root / "work.txt").exists())
 
@@ -291,7 +294,8 @@ class RunRequirementTests(unittest.TestCase):
         self.assertFalse(load_state(self.root).started)
         resumed = Engine(load_project(self.root), load_state(self.root), agentic=fake)
         self.assertEqual(resumed.start(), "running")
-        self.assertEqual([c[0] for c in fake.requirement_calls], ["worktree-create"])
+        self.assertEqual([c[0] for c in fake.requirement_calls],
+                         ["worktree-create", "worktree-status", "worktree-status"])
         self.assertTrue(load_state(self.root).started)
 
     def test_interrupted_start_adopts_an_unrecorded_worktree_of_its_own(self):
@@ -300,7 +304,7 @@ class RunRequirementTests(unittest.TestCase):
         state = self.new_run()
         # Created by Agentic Dev, but AgentFlow was interrupted before recording it.
         fake.create_worktree(self.root, name=f"agentflow-{state.run_id}", branch=f"agentflow/{state.run_id}",
-                             base=state.run_start_commit)
+                             base=state.run_start_commit, agent=state.executor, task=state.task)
         engine = Engine(load_project(self.root), load_state(self.root), agentic=fake)
         self.assertEqual(engine.start(), "running")
         state = load_state(self.root)
@@ -465,7 +469,7 @@ class RunRequirementTests(unittest.TestCase):
             self.assertLess(events.index("worktree_created"), events.index("session_prepared"))
             self.assertLess(events.index("session_prepared"), events.index("blocked"))
             self.assertEqual([call[0] for call in fake.session_calls],
-                             ["plan", "plan", "plan", "prepare", "plan"])
+                             ["plan", "plan", "plan", "prepare"])
         finally:
             os.chdir(old)
 
@@ -621,16 +625,100 @@ class RunRequirementTests(unittest.TestCase):
         branch = f"agentflow/{state.run_id}"
         tree = fake.create_worktree(self.root, name=name, branch=branch,
                                     base=state.run_start_commit, agent="codex", task=state.task)
-        state.worktree = {"name": name, "path": tree["worktree"], "branch": branch,
-                          "base": state.run_start_commit, "cleaned": False}
+        state.worktree = {
+            "name": name,
+            "path": tree["worktree"],
+            "branch": branch,
+            "base": state.run_start_commit,
+            "base_commit": state.run_start_commit,
+            "session_created_at": tree["session"]["created_at"],
+            "cleaned": False,
+        }
         save_state(self.root, state)
-        self.assertEqual(Engine(project, state, agentic=fake).start(), "running")
+        self.assertEqual(
+            Engine(project, state, agentic=fake).start(),
+            "running",
+            state.awaiting_reason,
+        )
         self.assertTrue(state.started)
-        self.assertEqual([call[0] for call in fake.session_calls], ["plan", "plan", "prepare"])
-        self.assertEqual([call[0] for call in fake.requirement_calls], ["worktree-create", "worktree-status"])
-        self.assertEqual(state.session_record["plan_digest"], state.approved_plan_digest)
+        self.assertEqual(
+            [call[0] for call in fake.session_calls], ["plan", "plan", "prepare"]
+        )
+        self.assertEqual(
+            [call[0] for call in fake.requirement_calls],
+            ["worktree-create", "worktree-status"],
+        )
+        self.assertEqual(
+            state.session_record["plan_digest"], state.approved_plan_digest
+        )
 
-    def test_started_session_rechecks_digest_before_resumed_stage(self):
+    def test_prepared_session_resume_uses_frozen_worktree_after_main_moves(self):
+        from agentflow.session import build_session_request
+
+        class ScriptedHarness(FakeHarness):
+            session_launch_verified = True
+
+            def execute_session(
+                self,
+                root,
+                prompt,
+                *,
+                permissions,
+                read_only=False,
+                extra=None,
+                env=None,
+            ):
+                return self.execute(
+                    root, prompt, read_only=read_only, extra=extra, env=env
+                )
+
+        self.use(isolation={"mode": "worktree"})
+        project = load_project(self.root)
+        pattern = load_pattern("custom", self.root)
+        state = self.new_run(executor="codex")
+        fake = FakeAgentic(worktree_root=self.tmp / "trees")
+        request = build_session_request(
+            project, pattern, state.task, state.executor, state.reviewers
+        )
+        plan = fake.plan_session(self.root, request)
+        state.session_request = request
+        state.session_plan = plan
+        state.approved_plan_digest = plan["plan_digest"]
+        save_state(self.root, state)
+        self.assertEqual(
+            Engine(project, state, agentic=fake).start(),
+            "running",
+            state.awaiting_reason,
+        )
+        self.assertTrue(state.started)
+        approved_commit = state.worktree["base_commit"]
+        (self.root / "later.txt").write_text("main advanced after preparation\n")
+        self.commit()
+        self.assertNotEqual(head_commit(self.root), approved_commit)
+        fake.session_digest = "f" * 64
+        before = len(fake.session_calls)
+        harness = ScriptedHarness()
+        with patch("agentflow.engine.get_harness", return_value=harness):
+            self.assertNotEqual(
+                Engine(project, load_state(self.root), agentic=fake).step(), "blocked"
+            )
+        self.assertEqual(len(fake.session_calls), before)
+        self.assertEqual(len(harness.seen), 1)
+        self.assertEqual(state.session_record["commit"], approved_commit)
+        self.assertEqual(head_commit(Path(state.worktree["path"])), approved_commit)
+        worktree = Path(state.worktree["path"])
+        subprocess.run(["git", "-C", str(worktree), "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "-C", str(worktree), "commit", "-qm", "stage progress"], check=True
+        )
+        self.assertNotEqual(head_commit(worktree), approved_commit)
+        self.assertEqual(
+            Engine(project, load_state(self.root), agentic=fake).step(), "complete"
+        )
+        self.assertEqual(len(fake.session_calls), before)
+
+    def test_replaced_or_wrong_session_worktree_blocks_resume_before_stage(self):
+        from copy import deepcopy
         from agentflow.session import build_session_request
 
         self.use(isolation={"mode": "worktree"})
@@ -638,41 +726,215 @@ class RunRequirementTests(unittest.TestCase):
         pattern = load_pattern("custom", self.root)
         state = self.new_run(executor="codex")
         fake = FakeAgentic(worktree_root=self.tmp / "trees")
-        request = build_session_request(project, pattern, state.task, state.executor, state.reviewers)
+        request = build_session_request(
+            project, pattern, state.task, state.executor, state.reviewers
+        )
+        plan = fake.plan_session(self.root, request)
+        state.session_request = request
+        state.session_plan = plan
+        state.approved_plan_digest = plan["plan_digest"]
+        save_state(self.root, state)
+        self.assertEqual(
+            Engine(project, state, agentic=fake).start(),
+            "running",
+            state.awaiting_reason,
+        )
+        original = deepcopy(fake.worktrees[state.worktree["name"]])
+        cases = {
+            "wrong path": ("worktree", str(self.tmp / "different")),
+            "switched branch": ("branch", "other-branch"),
+            "wrong repository": ("repository", str(self.tmp / "other-repo")),
+            "wrong session name": ("session.name", "other-run"),
+            "wrong session branch": ("session.branch", "other-branch"),
+            "wrong session base": ("session.base", "0" * 40),
+            "wrong session worktree": ("session.worktree", str(self.tmp / "different")),
+            "wrong session repository": (
+                "session.repository",
+                str(self.tmp / "other-repo"),
+            ),
+            "replaced session": ("session.created_at", "different-creation"),
+            "wrong head": ("head", "0" * 40),
+            "prunable": ("prunable", True),
+            "missing session": ("session", None),
+        }
+        for label, (field, replacement) in cases.items():
+            with self.subTest(label):
+                fake.worktrees[state.worktree["name"]] = deepcopy(original)
+                target = fake.worktrees[state.worktree["name"]]
+                if "." in field:
+                    target["session"][field.split(".", 1)[1]] = replacement
+                else:
+                    target[field] = replacement
+                resumed = load_state(self.root)
+                resumed.status = "running"
+                resumed.awaiting_reason = None
+                save_state(self.root, resumed)
+                with patch("agentflow.engine.get_harness") as launch:
+                    self.assertEqual(
+                        Engine(project, resumed, agentic=fake).step(), "blocked"
+                    )
+                    launch.assert_not_called()
+                self.assertIn("worktree", resumed.awaiting_reason)
+
+    def test_prepared_resume_rejects_changed_plan_record_or_worktree_binding(self):
+        from copy import deepcopy
+        from agentflow.session import build_session_request
+
+        self.use(isolation={"mode": "worktree"})
+        project = load_project(self.root)
+        pattern = load_pattern("custom", self.root)
+        state = self.new_run(executor="codex")
+        fake = FakeAgentic(worktree_root=self.tmp / "trees")
+        request = build_session_request(
+            project, pattern, state.task, state.executor, state.reviewers
+        )
         plan = fake.plan_session(self.root, request)
         state.session_request = request
         state.session_plan = plan
         state.approved_plan_digest = plan["plan_digest"]
         save_state(self.root, state)
         self.assertEqual(Engine(project, state, agentic=fake).start(), "running")
-        self.assertTrue(state.started)
-        fake.session_digest = "f" * 64
-        harness = FakeHarness()
-        with patch("agentflow.engine.get_harness", return_value=harness):
-            self.assertEqual(Engine(project, load_state(self.root), agentic=fake).step(), "blocked")
-        self.assertEqual(harness.seen, [])
-        self.assertIn("plan changed after approval", load_state(self.root).awaiting_reason)
+        cases = {
+            "plan digest": ("session_plan", "plan_digest", "0" * 64),
+            "record digest": ("session_record", "plan_digest", "0" * 64),
+            "record commit": ("session_record", "commit", "0" * 40),
+            "record workspace": (
+                "session_record",
+                "workspace",
+                str(self.tmp / "other"),
+            ),
+            "missing worktree identity": ("worktree", "session_created_at", None),
+        }
+        for label, (section, key, value) in cases.items():
+            with self.subTest(label):
+                resumed = deepcopy(state)
+                getattr(resumed, section)[key] = value
+                save_state(self.root, resumed)
+                with patch("agentflow.engine.get_harness") as launch:
+                    self.assertEqual(
+                        Engine(project, resumed, agentic=fake).step(), "blocked"
+                    )
+                    launch.assert_not_called()
+                self.assertTrue(resumed.awaiting_reason)
+
+    def test_interrupted_start_rejects_wrong_session_adoption(self):
+        self.use(isolation={"mode": "worktree"})
+        state = self.new_run()
+        fake = FakeAgentic(worktree_root=self.tmp / "trees")
+        name = f"agentflow-{state.run_id}"
+        fake.create_worktree(
+            self.root,
+            name=name,
+            branch=f"agentflow/{state.run_id}",
+            base=state.run_start_commit,
+            agent=state.executor,
+            task=state.task,
+        )
+        fake.worktrees[name]["session"]["base"] = "0" * 40
+        with patch("agentflow.engine.get_harness") as launch:
+            self.assertEqual(
+                Engine(load_project(self.root), state, agentic=fake).start(), "blocked"
+            )
+            launch.assert_not_called()
+        self.assertIsNone(state.worktree)
+        self.assertIn("session base changed", state.awaiting_reason)
+
+    def test_non_session_resume_rejects_replaced_worktree_identity(self):
+        self.use(isolation={"mode": "worktree"})
+        state = self.new_run()
+        fake = FakeAgentic(worktree_root=self.tmp / "trees")
+        project = load_project(self.root)
+        self.assertEqual(Engine(project, state, agentic=fake).start(), "running")
+        fake.worktrees[state.worktree["name"]]["session"]["name"] = "other-run"
+        with patch("agentflow.engine.get_harness") as launch:
+            self.assertEqual(
+                Engine(project, load_state(self.root), agentic=fake).step(), "blocked"
+            )
+            launch.assert_not_called()
+        self.assertIn("session name changed", load_state(self.root).awaiting_reason)
+
+    def test_started_isolated_run_with_missing_recorded_worktree_blocks(self):
+        self.use(isolation={"mode": "worktree"})
+        state = self.new_run()
+        fake = FakeAgentic(worktree_root=self.tmp / "trees")
+        project = load_project(self.root)
+        self.assertEqual(Engine(project, state, agentic=fake).start(), "running")
+        state.worktree = None
+        save_state(self.root, state)
+        with patch("agentflow.engine.get_harness") as launch:
+            self.assertEqual(
+                Engine(project, load_state(self.root), agentic=fake).step(), "blocked"
+            )
+            launch.assert_not_called()
+        self.assertIn(
+            "recorded worktree is missing", load_state(self.root).awaiting_reason
+        )
+
+    def test_symlink_replacement_of_prepared_worktree_blocks_before_stage(self):
+        from agentflow.session import build_session_request
+
+        self.use(isolation={"mode": "worktree"})
+        project = load_project(self.root)
+        pattern = load_pattern("custom", self.root)
+        state = self.new_run(executor="codex")
+        fake = FakeAgentic(worktree_root=self.tmp / "trees")
+        request = build_session_request(
+            project, pattern, state.task, state.executor, state.reviewers
+        )
+        plan = fake.plan_session(self.root, request)
+        state.session_request = request
+        state.session_plan = plan
+        state.approved_plan_digest = plan["plan_digest"]
+        save_state(self.root, state)
+        self.assertEqual(Engine(project, state, agentic=fake).start(), "running")
+        path = Path(state.worktree["path"])
+        moved = path.with_name("moved-worktree")
+        path.rename(moved)
+        path.symlink_to(moved, target_is_directory=True)
+        with patch("agentflow.engine.get_harness") as launch:
+            self.assertEqual(
+                Engine(project, load_state(self.root), agentic=fake).step(), "blocked"
+            )
+            launch.assert_not_called()
+        self.assertIn("symlink", load_state(self.root).awaiting_reason)
 
     # -- control-root bridge -------------------------------------------------------------------
 
     def test_isolated_harnesses_get_the_control_root_and_absolute_evidence_paths(self):
         self.use(isolation={"mode": "worktree"})
         harness = FakeHarness()
-        _, state = self.run_pattern(FakeAgentic(status="failed", worktree_root=self.tmp / "trees"), harness)
+        _, state = self.run_pattern(
+            FakeAgentic(status="failed", worktree_root=self.tmp / "trees"), harness
+        )
         tree = Path(state.worktree["path"])
-        self.assertEqual(harness.seen[0]["env"], {"AGENTFLOW_ROOT": str(self.root.resolve()),
-                                                  "AGENTFLOW_WORKSPACE": str(tree), "AGENTFLOW_RUN_ID": state.run_id})
-        second = harness.seen[1]["prompt"]  # the retry after a failed gate lists prior evidence
-        paths = [line.split(": ", 1)[1] for line in second.splitlines() if line.startswith(("- agent: ", "- gates: "))]
+        self.assertEqual(
+            harness.seen[0]["env"],
+            {
+                "AGENTFLOW_ROOT": str(self.root.resolve()),
+                "AGENTFLOW_WORKSPACE": str(tree),
+                "AGENTFLOW_RUN_ID": state.run_id,
+            },
+        )
+        second = harness.seen[1][
+            "prompt"
+        ]  # the retry after a failed gate lists prior evidence
+        paths = [
+            line.split(": ", 1)[1]
+            for line in second.splitlines()
+            if line.startswith(("- agent: ", "- gates: "))
+        ]
         self.assertTrue(paths)
         for path in paths:
             self.assertTrue(Path(path).is_absolute() and Path(path).exists(), path)
-        self.assertIn(f"AgentFlow state and evidence live in {self.root.resolve()}", second)
+        self.assertIn(
+            f"AgentFlow state and evidence live in {self.root.resolve()}", second
+        )
 
     def test_status_from_inside_the_worktree_reaches_the_primary_run(self):
         # A real child process, launched by AgentFlow's own harness adapter in the worktree.
         from agentflow.config import save_config
-        probe = (f"PYTHONPATH={SRC.parent} {sys.executable} -m agentflow.cli status; echo cwd=$(pwd -P)")
+
+        probe = f"PYTHONPATH={SRC.parent} {sys.executable} -m agentflow.cli status; echo cwd=$(pwd -P)"
         config = load_project(self.root).config
         config.harness = {"probe": {"command": ["sh", "-c", probe, "{prompt}"]}}
         save_config(self.root, config)

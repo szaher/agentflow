@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -127,8 +129,9 @@ class Engine:
         except AgenticError as exc:
             self._transition("blocked", f"session preparation failed: {exc}")
             return self.state.status
-        if prepared.get("plan_digest") != digest:
-            self._transition("blocked", "session record does not match the approved plan digest")
+        problem = self._session_record_error(prepared)
+        if problem:
+            self._transition("blocked", problem)
             return self.state.status
         if not _enforceable_session(prepared):
             self._transition("blocked", "session permission enforcement is unknown or unsupported")
@@ -144,52 +147,222 @@ class Engine:
         return self.state.status
 
     def _revalidate_approved_session(self) -> bool:
+        # Before first preparation, the primary checkout may still invalidate approval.
+        # S2 performs the authoritative check in the worktree immediately before placement.
+        if not self._approved_plan_bound():
+            return False
         plan = self.state.session_plan
         request = self.state.session_request
         digest = self.state.approved_plan_digest
-        if not (plan and request and digest and plan.get("plan_digest") == digest and plan.get("status") == "ready"):
-            self._transition("blocked", "session approval is missing or does not match the stored plan")
-            return False
+        assert plan is not None and request is not None and digest is not None
         try:
             current = self.agentic.plan_session(self.root, request)
         except AgenticError as exc:
             self._transition("blocked", f"session plan could not be revalidated: {exc}")
             return False
         if current.get("status") != "ready" or current.get("plan_digest") != digest:
-            self._transition("blocked", "session plan changed after approval; replan and approve a new run")
+            self._transition(
+                "blocked",
+                "session plan changed after approval; replan and approve a new run",
+            )
             return False
         return True
 
+    def _approved_plan_bound(self) -> bool:
+        plan = self.state.session_plan
+        request = self.state.session_request
+        digest = self.state.approved_plan_digest
+        if not (
+            isinstance(plan, dict)
+            and isinstance(request, dict)
+            and digest
+            and plan.get("plan_digest") == digest
+            and plan.get("status") == "ready"
+        ):
+            self._transition(
+                "blocked",
+                "session approval is missing or does not match the stored plan",
+            )
+            return False
+        return True
+
+    def _session_record_error(self, document: dict | None) -> str | None:
+        plan = self.state.session_plan
+        tree = self.state.worktree
+        digest = self.state.approved_plan_digest
+        if (
+            not isinstance(document, dict)
+            or not isinstance(plan, dict)
+            or not isinstance(tree, dict)
+            or not tree.get("path")
+            or not tree.get("base_commit")
+        ):
+            return "session record or prepared worktree is missing"
+        if document.get("plan_digest") != digest:
+            return "session record does not match the approved plan digest"
+        if document.get("status") != "prepared":
+            return "session record is not prepared"
+        workspace = document.get("workspace")
+        repository = document.get("repository")
+        if (
+            not isinstance(workspace, str)
+            or not isinstance(repository, str)
+            or Path(workspace).resolve() != Path(tree["path"]).resolve()
+            or Path(repository).resolve() != self.root.resolve()
+        ):
+            return "session record does not match the prepared worktree or repository"
+        if document.get("commit") != tree.get("base_commit"):
+            return "session record does not match the approved base commit"
+        for key in ("request_digest", "inputs_digest"):
+            if key in plan and document.get(key) != plan[key]:
+                return f"session record {key} does not match the approved plan"
+        return None
+
+    def _worktree_identity_error(
+        self, current: dict, tree: dict, *, fresh: bool = False
+    ) -> str | None:
+        if not isinstance(current, dict):
+            return "the run's worktree status is invalid"
+        if Path(tree["path"]).is_symlink():
+            return "the run's worktree path is a symlink"
+        session = current.get("session")
+        if current.get("prunable") or current.get("bare") or current.get("detached"):
+            return "the run's worktree is prunable, bare, or detached"
+        if not isinstance(session, dict):
+            return "the run's worktree has no Agentic Dev session metadata"
+        root = str(self.root.resolve())
+        path = str(Path(tree["path"]).resolve())
+        expected = {
+            "worktree": path,
+            "branch": tree["branch"],
+            "repository": root,
+        }
+        for key, value in expected.items():
+            actual = current.get(key)
+            if key in {"worktree", "repository"} and isinstance(actual, str):
+                actual = str(Path(actual).resolve())
+            if actual != value:
+                return f"the run's worktree {key} changed"
+        metadata = {
+            "name": tree["name"],
+            "branch": tree["branch"],
+            "base": tree["base"],
+            "worktree": path,
+            "repository": root,
+            "agent": self.state.executor,
+            "task": self.state.task,
+        }
+        if tree.get("session_created_at") is not None:
+            metadata["created_at"] = tree["session_created_at"]
+        else:
+            return "the run's worktree session creation identity is missing"
+        for key, value in metadata.items():
+            actual = session.get(key)
+            if key in {"worktree", "repository"} and isinstance(actual, str):
+                actual = str(Path(actual).resolve())
+            if actual != value:
+                return f"the run's worktree session {key} changed"
+        base = tree.get("base_commit")
+        head = current.get("head")
+        if base != self.state.run_start_commit or tree.get("base") != base:
+            return "the run's worktree base commit changed"
+        if not (
+            isinstance(base, str)
+            and isinstance(head, str)
+            and re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", base)
+            and re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", head)
+        ):
+            return "the run's worktree commit identity is missing"
+        if fresh and head != base:
+            return "the run's worktree did not start at the approved base commit"
+        # A stage may commit after preparation, but its HEAD must remain descended
+        # from the approved snapshot rather than switch to an unrelated history.
+        try:
+            ancestor = subprocess.run(
+                ["git", "-C", root, "merge-base", "--is-ancestor", base, head],
+                capture_output=True,
+                check=False,
+            )
+        except OSError:
+            return "the run's worktree base commit could not be verified"
+        if ancestor.returncode != 0:
+            return "the run's worktree no longer descends from its approved base commit"
+        return None
+
     def _ensure_worktree(self) -> bool:
         tree = self.state.worktree
-        if tree:  # recorded by an interrupted start: reuse it, never create a second one
-            if not Path(tree["path"]).is_dir():
-                self._transition("blocked", f"the run's worktree is missing: {tree['path']}")
+        # Verify the recorded worktree; never repair or create a second one.
+        if tree is not None:
+            if not isinstance(tree, dict) or any(
+                not tree.get(key)
+                for key in (
+                    "name",
+                    "path",
+                    "branch",
+                    "base",
+                    "base_commit",
+                    "session_created_at",
+                )
+            ):
+                self._transition(
+                    "blocked", "the run's recorded worktree identity is incomplete"
+                )
                 return False
-            if self.state.session_plan is not None:
-                try:
-                    current = self.agentic.worktree_status(self.root, tree["name"])
-                except AgenticError as exc:
-                    self._transition("blocked", f"the run's worktree cannot be verified: {exc}")
-                    return False
-                if Path(current["worktree"]).resolve() != Path(tree["path"]).resolve() or current["branch"] != tree["branch"]:
-                    self._transition("blocked", "the run's recorded worktree path or branch changed")
-                    return False
+            if Path(tree["path"]).is_symlink():
+                self._transition(
+                    "blocked", f"the run's worktree path is a symlink: {tree['path']}"
+                )
+                return False
+            if not Path(tree["path"]).is_dir():
+                self._transition(
+                    "blocked", f"the run's worktree is missing: {tree['path']}"
+                )
+                return False
+            try:
+                current = self.agentic.worktree_status(self.root, tree["name"])
+            except AgenticError as exc:
+                self._transition(
+                    "blocked", f"the run's worktree cannot be verified: {exc}"
+                )
+                return False
+            problem = self._worktree_identity_error(
+                current, tree, fresh=not self.state.started
+            )
+            if problem:
+                self._transition("blocked", problem)
+                return False
             return True
         base = self.state.run_start_commit
         if not base:
-            self._transition("blocked", "worktree isolation needs a commit to start from; commit first")
+            self._transition(
+                "blocked",
+                "worktree isolation needs a commit to start from; commit first",
+            )
             return False
         dirty = uncommitted_changes(self.root)
         if dirty:
-            shown = ", ".join(dirty[:8]) + (f" (+{len(dirty) - 8} more)" if len(dirty) > 8 else "")
-            self._transition("blocked", "worktree isolation starts from the committed run-start snapshot; "
-                                        f"commit or stash the current changes first: {shown}")
+            shown = ", ".join(dirty[:8]) + (
+                f" (+{len(dirty) - 8} more)" if len(dirty) > 8 else ""
+            )
+            self._transition(
+                "blocked",
+                "worktree isolation starts from the committed run-start snapshot; "
+                f"commit or stash the current changes first: {shown}",
+            )
             return False
-        name, branch = f"agentflow-{self.state.run_id}", f"agentflow/{self.state.run_id}"
+        name, branch = (
+            f"agentflow-{self.state.run_id}",
+            f"agentflow/{self.state.run_id}",
+        )
         try:
-            document = self.agentic.create_worktree(self.root, name=name, branch=branch, base=base,
-                                                    agent=self.state.executor, task=self.state.task)
+            document = self.agentic.create_worktree(
+                self.root,
+                name=name,
+                branch=branch,
+                base=base,
+                agent=self.state.executor,
+                task=self.state.task,
+            )
             event = "worktree_created"
         except AgenticError as exc:
             # Created before an interruption but never recorded? Adopt it only if it is exactly ours.
@@ -197,14 +370,36 @@ class Engine:
                 document = self.agentic.worktree_status(self.root, name)
             except AgenticError:
                 document = None
-            if not document or document["branch"] != branch:
+            if not document:
                 self._transition("blocked", f"worktree could not be created: {exc}")
                 return False
             event = "worktree_adopted"
         assert document is not None
-        self.state.worktree = {"name": name, "path": document["worktree"], "branch": branch,
-                               "base": base, "cleaned": False}
-        record(self.state, event, **{k: v for k, v in self.state.worktree.items() if k != "cleaned"})
+        try:
+            current = self.agentic.worktree_status(self.root, name)
+        except AgenticError as exc:
+            self._transition("blocked", f"the run's worktree cannot be verified: {exc}")
+            return False
+        session = current.get("session") if isinstance(current, dict) else None
+        candidate = {
+            "name": name,
+            "path": document["worktree"],
+            "branch": branch,
+            "base": base,
+            "base_commit": base,
+            "session_created_at": session.get("created_at") if isinstance(session, dict) else None,
+            "cleaned": False,
+        }
+        problem = self._worktree_identity_error(current, candidate, fresh=True)
+        if problem:
+            self._transition("blocked", problem)
+            return False
+        self.state.worktree = candidate
+        record(
+            self.state,
+            event,
+            **{k: v for k, v in self.state.worktree.items() if k != "cleaned"},
+        )
         save_state(self.root, self.state)
         return True
 
@@ -288,27 +483,38 @@ class Engine:
         if self.state.status in {"complete", "blocked", "awaiting_approval"}:
             return self.state.status
         if self.state.session_plan is None and isinstance(self.agentic, Agentic):
-            self._transition("blocked", "approved session plan is required before any stage")
+            self._transition(
+                "blocked", "approved session plan is required before any stage"
+            )
             return self.state.status
-        if self.state.session_plan is not None and self.state.started and not self._revalidate_approved_session():
+        if (
+            self.state.session_plan is not None
+            and self.state.started
+            and not self._approved_plan_bound()
+        ):
             return self.state.status
         if not self.state.started and self.start() != "running":
             return self.state.status
-        if self.state.session_plan is not None and (
-            self.state.session_record is None
-            or self.state.session_record.get("plan_digest") != self.state.approved_plan_digest
-            or not _enforceable_session(self.state.session_record)
-        ):
-            self._transition("blocked", "session record or permission enforcement is not valid for launch")
-            return self.state.status
         if self.state.session_plan is not None:
-            if self.state.worktree is None:
-                self._transition("blocked", "prepared session worktree is missing")
+            problem = self._session_record_error(self.state.session_record)
+            if problem:
+                self._transition("blocked", problem)
                 return self.state.status
-            if not self._ensure_worktree():
+            if not _enforceable_session(self.state.session_record):
+                self._transition(
+                    "blocked",
+                    "session permission enforcement is unknown or unsupported",
+                )
                 return self.state.status
+        if self.requirements.worktree and self.state.worktree is None:
+            self._transition("blocked", "the run's recorded worktree is missing")
+            return self.state.status
+        if self.state.worktree is not None and not self._ensure_worktree():
+            return self.state.status
         if not self.workspace.is_dir():
-            self._transition("blocked", f"the run's worktree is missing: {self.workspace}")
+            self._transition(
+                "blocked", f"the run's worktree is missing: {self.workspace}"
+            )
             return self.state.status
         stage = self.pattern.stage(self.state.stage)
         started = time.monotonic()

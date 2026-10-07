@@ -84,7 +84,7 @@ class RunState:
     reviewers: list[str] = field(default_factory=list)
     fingerprint: str | None = None
     run_start_commit: str | None = None
-    # The run's isolated worktree, when its pattern asks for one: name, path, branch, base, cleaned.
+    # Isolated worktree identity: name, path, branch, base, base_commit, session_created_at, cleaned.
     worktree: dict[str, Any] | None = None
     # True once run-start preparation (worktree, preconditions) has completed; no stage runs before.
     started: bool = False

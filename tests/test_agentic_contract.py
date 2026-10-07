@@ -97,6 +97,41 @@ class AgenticContractTests(unittest.TestCase):
         with self.assertRaises(AgenticError):
             self.agentic.prepare_session(root, plan)
 
+    def test_real_worktree_status_preserves_recorded_identity(self):
+        from agentflow.engine import Engine
+        from agentflow.git import head_commit
+        from agentflow.models import Project, ProjectConfig
+        from agentflow.patterns import load_pattern
+        from agentflow.state import new_state
+
+        root = self.repo({"README.md": "# worktree\n"})
+        pattern = load_pattern("fast", root)
+        state = new_state(
+            "change",
+            pattern.name,
+            pattern.entry,
+            "codex",
+            [],
+            run_start_commit=head_commit(root),
+        )
+        previous = os.environ.get("AGENTIC_WORKTREE_ROOT")
+        os.environ["AGENTIC_WORKTREE_ROOT"] = str(self.tmp / "trees")
+        try:
+            engine = Engine(Project(root, ProjectConfig()), state, agentic=self.agentic)
+            self.assertTrue(engine._ensure_worktree(), state.awaiting_reason)
+            tree = state.worktree
+            current = self.agentic.worktree_status(root, tree["name"])
+            self.assertEqual(tree["base_commit"], state.run_start_commit)
+            self.assertEqual(
+                tree["session_created_at"], current["session"]["created_at"]
+            )
+            self.assertTrue(engine._ensure_worktree(), state.awaiting_reason)
+        finally:
+            if previous is None:
+                os.environ.pop("AGENTIC_WORKTREE_ROOT", None)
+            else:
+                os.environ["AGENTIC_WORKTREE_ROOT"] = previous
+
     def test_real_cli_dry_run_shows_blocked_plan_without_state_or_worktree(self):
         import contextlib
         import io
