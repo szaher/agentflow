@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,10 @@ WORKTREE_CONTRACTS = {"contracts": "1", "worktree": "1", "worktree-status": "1",
 WORKTREE_FEATURES = ("worktree.lifecycle",)
 METRICS_CONTRACTS = {"contracts": "1", "metric-record": "1"}
 METRICS_FEATURES = ("metrics.record-report",)
+SESSION_PLAN_CONTRACTS = {"contracts": "1", "session-request": "1", "session-plan": "1"}
+SESSION_PLAN_FEATURES = ("session.permission-dimensions", "session.plan-read-only")
+SESSION_PREPARE_CONTRACTS = {"contracts": "1", "session-plan": "1", "session-record": "1"}
+SESSION_PREPARE_FEATURES = ("session.prepare-revalidated",)
 VERIFY_STATUSES = ("passed", "failed", "no-checks")
 
 
@@ -240,6 +245,47 @@ class Agentic:
         self.handshake(DOCTOR_CONTRACTS, ())
         _, document = self._call(["doctor", "--json"])
         return self._validated("doctor", document)
+
+    # -- session planning and preparation --------------------------------------------------------
+
+    def plan_session(self, root: Path, request: dict[str, Any]) -> dict[str, Any]:
+        """Resolve one Agentic Dev session plan without mutating repository or AgentFlow state."""
+
+        self.handshake(SESSION_PLAN_CONTRACTS, SESSION_PLAN_FEATURES)
+        self._validated("session-request", request)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as handle:
+            json.dump(request, handle, sort_keys=True)
+            handle.flush()
+            code, document = self._call(
+                ["session", "plan", "--request", handle.name, "--path", str(root), "--json"],
+                cwd=root,
+                ok=(0, 1),
+            )
+        self._validated("session-plan", document)
+        expected = 0 if document.get("status") == "ready" else 1
+        if code != expected:
+            raise AgenticError(
+                f"`agentic session plan` status {document.get('status')!r} disagrees with exit {code}"
+            )
+        return document
+
+    def prepare_session(self, workspace: Path, plan: dict[str, Any]) -> dict[str, Any]:
+        """Prepare an approved plan in an existing worktree and return session-record@1.
+
+        Only successful preparation returns JSON today; all fail-closed exits are surfaced as
+        AgenticError and therefore stop AgentFlow before any stage.
+        """
+
+        self.handshake(SESSION_PREPARE_CONTRACTS, SESSION_PREPARE_FEATURES)
+        self._validated("session-plan", plan)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as handle:
+            json.dump(plan, handle, sort_keys=True)
+            handle.flush()
+            _, document = self._call(
+                ["session", "prepare", "--plan", handle.name, "--path", str(workspace), "--json"],
+                cwd=workspace,
+            )
+        return self._validated("session-record", document)
 
     # -- pattern requirements: readiness, capabilities, worktrees, metrics ---------------------
 

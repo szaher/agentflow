@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agentflow.bootstrap import init_project
+from agentflow.agentic import Agentic
 from agentflow.config import load_project
 from agentflow.engine import Engine
 from agentflow.models import HarnessResult, ProjectConfig
@@ -60,6 +61,20 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(fake_agentic.calls[0]["commands"],["python -c 'print(1)'"])
             self.assertTrue((root/"work.txt").exists())
         finally: td.cleanup()
+
+    def test_real_client_refuses_legacy_state_without_session_approval(self):
+        td, root = self.repo()
+        try:
+            init_project(root, ProjectConfig(pattern="fast"), agentic=FakeAgentic())
+            pattern = load_pattern("fast", root)
+            state = new_state("change", pattern.name, pattern.entry, "codex", [])
+            harness = FakeHarness()
+            with patch("agentflow.engine.get_harness", return_value=harness):
+                self.assertEqual(Engine(load_project(root), state, agentic=Agentic("/unused")).step(), "blocked")
+            self.assertIn("approved session plan is required", state.awaiting_reason)
+            self.assertEqual(harness.seen, [])
+        finally:
+            td.cleanup()
 
     def test_mutating_reviewer_is_rejected(self):
         td,root=self.repo()

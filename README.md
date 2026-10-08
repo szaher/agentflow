@@ -82,8 +82,11 @@ git commit -m "chore: enable Agentflow"
 Then run a task:
 
 ```bash
+agentflow run "Implement password reset with expiring single-use tokens" --dry-run
 agentflow run "Implement password reset with expiring single-use tokens"
 ```
+
+The dry run displays the resolved workflow, Agentic Dev session plan, blockers, and `plan_digest` without creating run state or a worktree. A ready plan needs explicit approval of that digest before preparation; use `--yes` to approve one new run in a non-interactive script. Real Codex/Claude/Pi/OpenCode plans remain blocked while their launch permissions are `unknown`, and AgentFlow will not launch them. Verified launch recipes are still required before real execution.
 
 Use another pattern or harness for a specific run:
 
@@ -329,13 +332,16 @@ A pattern can also declare what must hold before a run starts and how the run is
 
 | Field | Meaning |
 |---|---|
-| `requires.readiness` | The repository must meet this Agent Ready level: `agentic ready verify --scope local` in the run's workspace. If not, the run is **blocked** with the blockers listed and the assessment kept as evidence. AgentFlow never remediates (never runs `agentic ready make`). |
-| `requires.capabilities` | Each named capability must exist and be enabled (`agentic capabilities status`). AgentFlow never enables one for you. |
+| `requires.readiness` | Passed as `readiness_minimum` to Agentic Dev's session planner. A missing level blocks the plan; preparation revalidates it. AgentFlow never remediates. |
+| `requires.capabilities` | Passed as required capabilities to the session planner. They must already be enabled; AgentFlow never enables them. |
+| `requires.skills`, `requires.allowed_skills` | Required skills and optional allowlist passed to the session planner. Only selected skills are prepared in the worktree. |
+| `requires.trust_profile`, `requires.trust_ceiling` | Requested trust profile and ceiling, composed by Agentic Dev with the repository profile. |
+| `requires.permissions` | Optional `implementer` and `reviewer` filesystem/network bounds. Reviewers remain read-only; Agentic Dev rejects invalid or unenforceable bounds. |
 | `verification.minimum` | Kinds every gate of this pattern requires, added to the profile's kinds. They also apply when `.agentflow/config.json` replaces a profile with custom commands. |
-| `isolation.mode: worktree` | One Agentic Dev worktree per run (`agentflow-<run id>`, branch `agentflow/<run id>`), created from the run-start commit. Agents, reviews, gates and the risk check all run there; your checkout is untouched, and `.agentflow/` state and evidence stay in it. The worktree holds exactly the committed snapshot, so an isolated run **will not start while your checkout has uncommitted changes** (commit or stash them first; AgentFlow never does either for you). |
+| `isolation.mode: worktree` | Session runs always prepare a linked worktree (`agentflow-<run id>`, branch `agentflow/<run id>`) from the approved commit. This pattern field remains relevant to cleanup policy. The worktree must be clean; AgentFlow never copies or stashes uncommitted changes. |
 | `isolation.cleanup: on-success` | When a run completes, ask Agentic Dev for a normal clean. A worktree with uncommitted work is refused and kept. Worktrees are never force-removed, and failed or blocked runs always keep theirs (`agentic worktree clean agentflow-<run id>` when you are done). |
 
-The order at run start is fixed: the worktree first (if isolated), then readiness and capabilities in that workspace, then the first stage. No stage ever runs before that preparation has completed: `agentflow step` on a fresh or interrupted run finishes it first, and an interrupted start reuses the worktree it already created. `agentflow run --dry-run` prints the entry stage and requirements and changes nothing.
+The order is: resolve request and plan in the primary checkout, display the `plan_digest`, obtain explicit per-run approval, persist that approval, create or reuse the worktree, call `agentic session prepare`, and save `session-record@1` as evidence. A changed plan or failed preparation blocks the run before any stage. `agentflow step` resumes an approved, interrupted preparation using the same digest and worktree.
 
 Harnesses AgentFlow launches get `AGENTFLOW_ROOT` (the primary checkout), `AGENTFLOW_WORKSPACE`, and `AGENTFLOW_RUN_ID`. Inside an isolated worktree, `agentflow status` and `agentflow verify` therefore reach the run's state in the primary checkout, and evidence paths in stage prompts are absolute. `AGENTFLOW_ROOT` is honoured only from inside that root or the run's workspace. Unknown keys in these sections are a validation error, not ignored. Level, capability and kind names belong to Agentic Dev, which rejects unknown ones.
 
@@ -351,7 +357,8 @@ agentflow provider status        is the agentflow provider (agentflow-sdlc skill
 agentflow provider install       install it if missing (--replace to replace a different one)
 agentflow doctor                 validate project integration
 agentflow configure              update common project settings
-agentflow run TASK               create and execute a run
+agentflow run TASK --dry-run     show workflow + session plan without mutation
+agentflow run TASK [--yes]      plan, approve, prepare, then run supported stages
 agentflow step                   execute only the current stage
 agentflow status                 inspect durable workflow state
 agentflow verify                 run deterministic project gates

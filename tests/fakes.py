@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -20,7 +21,8 @@ class FakeAgentic:
     def __init__(self, kinds=("lint", "test"), status="passed", missing=(), unavailable=None,
                  bundled_digest="a" * 64, installed=None, block_status="created", skills_status="ok",
                  tools=("claude", "codex"), readiness_passed=True, capability_state=None, worktree_root=None,
-                 clean_error=None, metrics_error=None):
+                 clean_error=None, metrics_error=None, session_status="ready", session_digest="d" * 64,
+                 prepare_error=None):
         self.kinds = set(kinds)
         self.status = status
         self.missing = list(missing)
@@ -44,6 +46,54 @@ class FakeAgentic:
         self.requirement_calls: list[tuple] = []
         self.worktrees: dict[str, dict] = {}
         self.metrics: list[dict] = []
+        self.session_status = session_status
+        self.session_digest = session_digest
+        self.session_calls: list[tuple] = []
+        self.session_plan_override: dict | None = None
+        self.prepare_error = prepare_error
+
+    def plan_session(self, root, request):
+        self.session_calls.append(("plan", str(root), request))
+        if self.session_plan_override is not None:
+            return dict(self.session_plan_override)
+        return {
+            "schema_version": "1", "document_type": "agentic.session-plan",
+            "status": self.session_status, "repository": str(root), "request": request,
+            "plan_digest": self.session_digest, "request_digest": "r" * 64,
+            "inputs_digest": "i" * 64,
+            "invocations": [{"id": item["id"], "role": item["role"],
+                             "harness": item["harness"], "version": "test-1.0",
+                             "permissions": {dimension: {"effective": {"level": bounds["minimum"]},
+                                                        "enforceable": "enforceable" if self.session_status == "ready" else "unknown"}
+                                             for dimension, bounds in item["permissions"].items()}}
+                            for item in request["invocations"]],
+            "blockers": [] if self.session_status == "ready" else
+                        [{"code": "permission-unenforceable", "detail": "test unknown enforcement"}],
+        }
+
+    def prepare_session(self, workspace, plan):
+        self.session_calls.append(("prepare", str(workspace), plan["plan_digest"]))
+        if self.prepare_error:
+            from agentflow.agentic import AgenticError
+
+            raise AgenticError(self.prepare_error)
+        return {
+            "schema_version": "1",
+            "document_type": "agentic.session-record",
+            "status": "prepared",
+            "repository": plan["repository"],
+            "workspace": str(workspace),
+            "commit": subprocess.run(
+                ["git", "-C", str(workspace), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip(),
+            "plan_digest": plan["plan_digest"],
+            "request_digest": plan["request_digest"],
+            "inputs_digest": plan["inputs_digest"],
+            "invocations": plan["invocations"],
+        }
 
     def handshake(self):
         if self.unavailable:
@@ -109,6 +159,7 @@ def _bootstrap_methods():
 
 def _requirement_methods():
     import subprocess
+    from datetime import datetime, timezone
 
     from agentflow.agentic import AgenticError
 
@@ -130,19 +181,70 @@ def _requirement_methods():
         self.handshake()
         self.requirement_calls.append(("worktree-create", name, branch, base))
         path = Path(self.worktree_root or Path(root).parent / "worktrees") / name
-        done = subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", branch, str(path), base],
-                              capture_output=True, text=True, check=False)
+        done = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                str(path),
+                base,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         if done.returncode:  # like agentic: exit 2, nothing created
-            raise AgenticError(f"`agentic worktree create` exited 2: {done.stderr.strip()}")
-        self.worktrees[name] = {"document_type": "agentic.worktree-status", "worktree": str(path), "branch": branch}
-        return {"document_type": "agentic.worktree", "worktree": str(path), "branch": branch}
+            raise AgenticError(
+                f"`agentic worktree create` exited 2: {done.stderr.strip()}"
+            )
+        session = {
+            "schema_version": "1",
+            "name": name,
+            "branch": branch,
+            "base": base,
+            "agent": agent,
+            "task": task,
+            "repository": str(root),
+            "worktree": str(path),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self.worktrees[name] = {
+            "document_type": "agentic.worktree-status",
+            "repository": str(root),
+            "worktree": str(path),
+            "branch": branch,
+            "session": session,
+        }
+        return {
+            "document_type": "agentic.worktree",
+            "repository": str(root),
+            "worktree": str(path),
+            "branch": branch,
+            "session": session,
+        }
 
     def worktree_status(self, root, name):
         self.handshake()
         self.requirement_calls.append(("worktree-status", name))
         if name not in self.worktrees:
-            raise AgenticError(f"`agentic worktree status` exited 2: unknown worktree: {name}")
-        return dict(self.worktrees[name])
+            raise AgenticError(
+                f"`agentic worktree status` exited 2: unknown worktree: {name}"
+            )
+        document = dict(self.worktrees[name])
+        actual_path = Path(self.worktree_root or Path(root).parent / "worktrees") / name
+        if "head" not in document:
+            document["head"] = subprocess.run(
+                ["git", "-C", str(actual_path), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        return document
 
     def clean_worktree(self, root, name):
         self.handshake()

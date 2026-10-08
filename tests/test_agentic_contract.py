@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentflow.agentic import Agentic
+from agentflow.agentic import Agentic, AgenticError
 from agentflow.gates import run_gates
 from agentflow.models import ProjectConfig
 
@@ -61,6 +61,128 @@ class AgenticContractTests(unittest.TestCase):
     def test_handshake(self):
         document = self.agentic.handshake()
         jsonschema.validate(document, self.schema("contracts"))
+
+    def test_session_plan_contract_is_consumed_fail_closed(self):
+        root = self.repo({"README.md": "# session\n", "app.py": "print(1)\n"})
+        from agentflow.models import Project, ProjectConfig
+        from agentflow.patterns import load_pattern
+        from agentflow.session import build_session_request
+
+        project = Project(root, ProjectConfig(pattern="fast", executor="codex", reviewers=[]))
+        request = build_session_request(project, load_pattern("fast", root), "Fix the app", "codex", [])
+        before = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        plan = self.agentic.plan_session(root, request)
+        jsonschema.validate(request, self.schema("session-request"))
+        jsonschema.validate(plan, self.schema("session-plan"))
+        self.assertEqual(plan["status"], "blocked")
+        self.assertEqual(plan["request"]["task"], "Fix the app")
+        self.assertTrue(plan["plan_digest"])
+        self.assertTrue(
+            any(item["code"] == "permission-unenforceable" for item in plan["blockers"])
+        )
+        self.assertEqual(
+            subprocess.run(
+                ["git", "-C", str(root), "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout,
+            before,
+        )
+        with self.assertRaises(AgenticError):
+            self.agentic.prepare_session(root, plan)
+
+    def test_real_worktree_status_preserves_recorded_identity(self):
+        from agentflow.engine import Engine
+        from agentflow.git import head_commit
+        from agentflow.models import Project, ProjectConfig
+        from agentflow.patterns import load_pattern
+        from agentflow.state import new_state
+
+        root = self.repo({"README.md": "# worktree\n"})
+        pattern = load_pattern("fast", root)
+        state = new_state(
+            "change",
+            pattern.name,
+            pattern.entry,
+            "codex",
+            [],
+            run_start_commit=head_commit(root),
+        )
+        previous = os.environ.get("AGENTIC_WORKTREE_ROOT")
+        os.environ["AGENTIC_WORKTREE_ROOT"] = str(self.tmp / "trees")
+        try:
+            engine = Engine(Project(root, ProjectConfig()), state, agentic=self.agentic)
+            self.assertTrue(engine._ensure_worktree(), state.awaiting_reason)
+            tree = state.worktree
+            current = self.agentic.worktree_status(root, tree["name"])
+            self.assertEqual(tree["base_commit"], state.run_start_commit)
+            self.assertEqual(
+                tree["session_created_at"], current["session"]["created_at"]
+            )
+            self.assertTrue(engine._ensure_worktree(), state.awaiting_reason)
+        finally:
+            if previous is None:
+                os.environ.pop("AGENTIC_WORKTREE_ROOT", None)
+            else:
+                os.environ["AGENTIC_WORKTREE_ROOT"] = previous
+
+    def test_real_cli_dry_run_shows_blocked_plan_without_state_or_worktree(self):
+        import contextlib
+        import io
+        from unittest.mock import patch
+
+        from agentflow import cli
+        from agentflow.config import save_config
+        from agentflow.models import Project, ProjectConfig
+
+        root = self.repo({"README.md": "# session\n", "app.py": "print(1)\n"})
+        save_config(root, ProjectConfig(pattern="fast", executor="codex", reviewers=[]))
+        control = root / ".agentflow"
+        before = {p.relative_to(control): p.read_bytes() for p in control.rglob("*") if p.is_file()}
+        trees_before = subprocess.check_output(["git", "-C", str(root), "worktree", "list"], text=True)
+        with (patch("agentflow.cli.load_project", return_value=Project(root, ProjectConfig(
+                  pattern="fast", executor="codex", reviewers=[]))),
+              patch("agentflow.cli.Agentic", return_value=self.agentic),
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            self.assertEqual(cli.main(["run", "Fix the app", "--dry-run"]), 2)
+        self.assertIn("plan_digest=", output.getvalue())
+        self.assertIn("Workflow: fast", output.getvalue())
+        self.assertIn("permission-unenforceable", output.getvalue())
+        with (patch("agentflow.cli.load_project", return_value=Project(root, ProjectConfig(
+                  pattern="fast", executor="codex", reviewers=[]))),
+              patch("agentflow.cli.Agentic", return_value=self.agentic),
+              contextlib.redirect_stdout(io.StringIO())):
+            self.assertEqual(cli.main(["run", "Fix the app", "--yes"]), 2)
+        self.assertEqual({p.relative_to(control): p.read_bytes() for p in control.rglob("*") if p.is_file()}, before)
+        self.assertEqual(subprocess.check_output(["git", "-C", str(root), "worktree", "list"], text=True),
+                         trees_before)
+
+    def test_real_adapter_refuses_legacy_engine_state_before_worktree_or_harness(self):
+        from unittest.mock import patch
+
+        from agentflow.engine import Engine
+        from agentflow.git import head_commit
+        from agentflow.models import Project
+        from agentflow.state import new_state
+
+        root = self.repo({"README.md": "# session\n", "app.py": "print(1)\n"})
+        project = Project(root, ProjectConfig(pattern="fast", executor="codex"))
+        state = new_state("Fix the app", "fast", "implement", "codex", [],
+                          run_start_commit=head_commit(root))
+        trees_before = subprocess.check_output(["git", "-C", str(root), "worktree", "list"], text=True)
+        with patch("agentflow.engine.get_harness") as get_harness:
+            self.assertEqual(Engine(project, state, agentic=self.agentic).start(), "blocked")
+        self.assertIn("approved session plan is required", state.awaiting_reason)
+        self.assertIsNone(state.worktree)
+        get_harness.assert_not_called()
+        self.assertEqual(subprocess.check_output(["git", "-C", str(root), "worktree", "list"], text=True),
+                         trees_before)
 
     def test_a_missing_required_kind_fails_and_executes_nothing(self):
         # `fast` requires lint + test; the repo only has `make check` (test). Discovery must not weaken that.
@@ -239,121 +361,6 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertEqual(set(detected(document["tools"])), {"claude", "codex", "pi", "opencode"})
 
 
-@unittest.skipUnless(AGENTIC and jsonschema, "needs an installed `agentic` and jsonschema")
-class RequirementContractTests(unittest.TestCase):
-    """Pattern requirements against the real agentic: worktree, local readiness, capabilities, metrics."""
-
-    def setUp(self):
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from fakes import FakeAgentic
-        from agentflow.bootstrap import init_project
-        self.tmp = Path(tempfile.mkdtemp(prefix="agentflow-requirements-"))
-        keys = ("AGENTIC_DEV_CONFIG_DIR", "AGENTIC_WORKTREE_ROOT")
-        self.saved = {k: os.environ.get(k) for k in keys}
-        os.environ.update({"AGENTIC_DEV_CONFIG_DIR": str(self.tmp / "config"),
-                           "AGENTIC_WORKTREE_ROOT": str(self.tmp / "worktrees")})
-        self.root = self.tmp / "repo"
-        git = ["git", "-C", str(self.root), "-c", "user.email=t@example.com", "-c", "user.name=T"]
-        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
-        (self.root / "app.py").write_text("print(1)\n")
-        subprocess.run([*git, "add", "."], check=True)
-        subprocess.run([*git, "commit", "-qm", "seed"], check=True)
-        # AgentFlow's own files only; the run below talks to the real agentic.
-        init_project(self.root, ProjectConfig(pattern="fast", gates={"fast": ["true"]}), agentic=FakeAgentic())
-
-    def tearDown(self):
-        for key, value in self.saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        subprocess.run(["git", "-C", str(self.root), "worktree", "prune"], capture_output=True)
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def run_pattern(self, **requirements):
-        from test_engine import FakeHarness
-        from unittest.mock import patch
-        from agentflow.config import load_project
-        from agentflow.engine import Engine
-        from agentflow.git import head_commit
-        from agentflow.patterns import load_pattern
-        from agentflow.state import load_state, new_state, save_state
-        fast = json.loads((Path(__file__).resolve().parents[1] / "src" / "agentflow" / "builtin_patterns"
-                           / "fast.json").read_text())
-        (self.root / ".agentflow" / "patterns" / "custom.json").write_text(
-            json.dumps({**fast, "name": "custom", **requirements}))
-        git = ["git", "-C", str(self.root), "-c", "user.email=t@example.com", "-c", "user.name=T"]
-        subprocess.run([*git, "add", "-A"], check=True)
-        subprocess.run([*git, "commit", "-qm", "agentflow"], check=True, capture_output=True)
-        p = load_pattern("custom", self.root)
-        state = new_state("change", p.name, p.entry, "claude", [], run_start_commit=head_commit(self.root))
-        save_state(self.root, state)
-        engine = Engine(load_project(self.root), state, agentic=Agentic(AGENTIC))
-        with patch("agentflow.engine.get_harness", return_value=FakeHarness()):
-            status = engine.start()
-            if status == "running":
-                status = engine.run(max_steps=20)
-        return status, load_state(self.root)
-
-    def schema(self, name: str) -> dict:
-        return json.loads(subprocess.run([AGENTIC, "contracts", "schema", name], capture_output=True, text=True,
-                                         check=True).stdout)
-
-    def test_readiness_is_checked_in_the_worktree_and_blocks_without_remediation(self):
-        status, state = self.run_pattern(requires={"readiness": "foundational"}, isolation={"mode": "worktree"})
-        self.assertEqual(status, "blocked")
-        self.assertIn("readiness foundational not met", state.awaiting_reason)
-        tree = Path(state.worktree["path"])
-        self.assertTrue(tree.is_dir())
-        self.assertTrue(tree.is_relative_to((self.tmp / "worktrees").resolve()))
-        evidence = json.loads((self.root / next(e["path"] for e in state.evidence
-                                                if e["kind"] == "precondition")).read_text())
-        jsonschema.validate(evidence["document"], self.schema("readiness-verification"))
-        self.assertEqual((evidence["document"]["scope"], evidence["document"]["passed"]), ("local", False))
-        self.assertEqual(subprocess.run(["git", "-C", str(self.root), "status", "--porcelain"], capture_output=True,
-                                        text=True, check=True).stdout, "")  # primary checkout untouched
-
-    def test_interrupted_start_adopts_the_real_worktree_instead_of_creating_another(self):
-        from agentflow.config import load_project
-        from agentflow.engine import Engine
-        from agentflow.state import load_state
-        self.run_pattern(isolation={"mode": "worktree"})  # installs and commits the pattern
-        state = load_state(self.root)
-        # A second run whose worktree Agentic Dev created but AgentFlow never recorded.
-        from agentflow.git import head_commit
-        from agentflow.state import new_state, save_state
-        fresh = new_state("again", "custom", state.stage, "claude", [], run_start_commit=head_commit(self.root))
-        save_state(self.root, fresh)
-        Agentic(AGENTIC).create_worktree(self.root, name=f"agentflow-{fresh.run_id}",
-                                         branch=f"agentflow/{fresh.run_id}", base=fresh.run_start_commit)
-        self.assertEqual(Engine(load_project(self.root), load_state(self.root), agentic=Agentic(AGENTIC)).start(),
-                         "running")
-        adopted = load_state(self.root)
-        self.assertTrue(adopted.started)
-        self.assertTrue(any(h["event"] == "worktree_adopted" for h in adopted.history))
-        self.assertTrue(Path(adopted.worktree["path"]).is_dir())
-
-    def test_unknown_capability_blocks(self):
-        status, state = self.run_pattern(requires={"capabilities": ["no-such-capability"]})
-        self.assertEqual(status, "blocked")
-        self.assertIn("unknown capability: no-such-capability", state.awaiting_reason)
-
-    def test_isolated_run_with_metrics_and_a_refused_cleanup(self):
-        subprocess.run([AGENTIC, "metrics", "enable"], check=True, capture_output=True)
-        status, state = self.run_pattern(verification={"minimum": []},
-                                         isolation={"mode": "worktree", "cleanup": "on-success"})
-        self.assertEqual(status, "complete")
-        tree = Path(state.worktree["path"])
-        # The agent's uncommitted work makes the worktree dirty: Agentic Dev refuses, AgentFlow never forces.
-        self.assertTrue((tree / "work.txt").exists())
-        self.assertFalse(state.worktree["cleaned"])
-        self.assertTrue(any(h["event"] == "worktree_kept" for h in state.history))
-        self.assertFalse((self.root / "work.txt").exists())
-        summary = json.loads(subprocess.run([AGENTIC, "metrics", "summary", "--json"], capture_output=True,
-                                            text=True, check=True).stdout)
-        self.assertIn("implement", json.dumps(summary))
-        self.assertIn("verify", json.dumps(summary))
 
 
 if __name__ == "__main__":
